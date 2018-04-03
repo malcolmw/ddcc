@@ -17,7 +17,6 @@ import obspy.signal.cross_correlation
 import os
 import pandas as pd
 import pyasdf
-import seismicity_catalog as sc
 import sys
 import time
 
