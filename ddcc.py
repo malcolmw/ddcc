@@ -3,7 +3,6 @@ This script was tested with Python2.7.14, because the core dependency
 (pyasdf) is not yet (04/02/2018) stable under python3.
 
 TODO:: logging
-TODO:: parameter parsing
 """
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -11,6 +10,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 import argparse
 import ConfigParser as configparser
 import h5py
+import logging
 import numpy as np
 import obspy as op
 import obspy.signal.cross_correlation
@@ -19,29 +19,9 @@ import pandas as pd
 import pyasdf
 import sys
 import time
-
 import traceback
 
-home = os.environ["HOME"]
-
-#PARAMS = {"TLEAD_P"   : 0.5,  # number of seconds before P-wave arrival to correlate
-#          "TLEAD_S"   : 0.5,  # number of seconds before S-wave arrival to correlate
-#          "TLAG_P"    : 1.,   # number of seconds after P-wave arrival to correlate
-#          "TLAG_S"    : 1.,   # number of seconds after S-wave arrival to correlate
-#          "CORR_MIN"  : 0.6,  # minimum correlation coefficient value to consider valid measurement
-#          "NCORR_MIN" : 6,    # minimum number of correlation values to consider even correlation valid
-#          "KNN"       : 10,   # number of nearest neighbours to correlate
-#          "ASDFIN"    : "/Users/malcolcw/tmp/ddcc.h5",
-#          "HDF5IN"    : "/Users/malcolcw/Projects/San-Jacinto/proc/v2.3/ddcc-events-25.h5",
-#          "HDF5OUT"   : "/Users/malcolcw/tmp/ddcc-out-25.h5",
-#          "CATIN"     : os.path.join(home,
-#                                     "Projects",
-#                                     "San-Jacinto",
-#                                     "proc",
-#                                     "v2.3",
-#                                     #"2008/San-Jacinto-2008.h5")
-#                                     "San-Jacinto-complete.h5")
-#         }
+logger = logging.getLogger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -51,6 +31,8 @@ def parse_args():
     parser.add_argument("corr_out", type=str, help="output HDF5 file for "\
                                                    "correlation results")
     parser.add_argument("config_file", type=str, help="configuration file")
+    parser.add_argument('-l', '--logfile', type=str, help='log file')
+    parser.add_argument('-v', '--verbose', action='store_true', help='verbose')
     args = parser.parse_args()
     not_found = [f for f in (args.wfs_in,
                              args.events_in,
@@ -59,53 +41,83 @@ def parse_args():
         raise(IOError("file(s) not found: {:s}".format(", ".join(not_found))))
     return(args)
 
-def parse_config(config_file):
-    parser = configparser.ConfigParser()
-    parser.readfp(open(config_file))
-    config = {"tlead_p"  : parser.getfloat("general", "tlead_p"),
-              "tlead_s"  : parser.getfloat("general", "tlead_s"),
-              "tlag_p"   :  parser.getfloat("general", "tlag_p"),
-              "tlag_s"   :  parser.getfloat("general", "tlag_s"),
-              "corr_min" :  parser.getfloat("general", "corr_min"),
-              "ncorr_min":  parser.getint("general", "ncorr_min"),
-              "knn"      :  parser.getint("general", "knn")}
-    return(config)
-
 def main(args, cfg):
+    logger.info("starting process")
     with pyasdf.ASDFDataSet(args.wfs_in, mode="r") as asdf_dset:
 
         comm, rank, size, MPI = asdf_dset.mpi
+
         if rank == 0:
-            print("rank %d: loading data" % rank)
+            logger.info("loading events to scatter")
             df0_event, df0_phase = load_event_data(args.events_in)
-            print("rank %d: data loaded" % rank)
+            logger.info("events loaded")
             data = np.array_split(df0_event.index, size)
         else:
             data = None
-        print("rank %d: receiving data" % rank)
+        logger.info("receiving scattered data")
         data = comm.scatter(data, root=0)
-        print("rank %d: data received" % rank)
 
-        print("rank %d: loading data" % rank)
+        logger.info("loading event data to process")
         df0_event, df0_phase = load_event_data(args.events_in, evids=data)
-        print("rank %d: data loaded" % rank)
 
-        print("rank %d: opening HDF5 output file" % rank)
         with h5py.File(args.corr_out, "w", driver="mpio", comm=comm) as f5out:
-            print("rank %d: HDF5 output file opened" % rank)
+            logger.info("initializing output file")
             initialize_f5out(f5out, cfg)
             for evid in data:
                 try:
                     correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg)
                 except Exception as err:
-                    print("ERROR:: error correlating event ID#{:d}".format(evid))
-                    print(traceback.print_tb(sys.exc_info()[2]))
+                    logger.error(traceback.print_tb(sys.exc_info()[0]))
+                    logger.error(traceback.print_tb(sys.exc_info()[1]))
+                    logger.error(traceback.print_tb(sys.exc_info()[2]))
+    logger.info("process completed successfully")
+
+def parse_config(config_file):
+    parser = configparser.ConfigParser()
+    parser.readfp(open(config_file))
+    config = {"tlead_p"  : parser.getfloat("general", "tlead_p"),
+              "tlead_s"  : parser.getfloat("general", "tlead_s"),
+              "tlag_p"   : parser.getfloat("general", "tlag_p"),
+              "tlag_s"   : parser.getfloat("general", "tlag_s"),
+              "corr_min" : parser.getfloat("general", "corr_min"),
+              "ncorr_min": parser.getint(  "general", "ncorr_min"),
+              "knn"      : parser.getint(  "general", "knn")}
+    return(config)
+
+
+def configure_logging(verbose, logfile):
+    """
+    A utility function to configure logging.
+    """
+    if verbose is True:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    for name in (__name__,):
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
+        if level == logging.DEBUG:
+            formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
+                    "%(funcName)s()::%(process)d:: %(message)s",
+                    datefmt="%Y%j %H:%M:%S")
+        else:
+            formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
+                    " %(message)s",
+                    datefmt="%Y%j %H:%M:%S")
+        if logfile is not None:
+            file_handler = logging.FileHandler(logfile)
+            file_handler.setLevel(level)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(level)
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
 
 def load_event_data(f5in, evids=None):
     with pd.HDFStore(f5in) as cat:
         if evids is None:
-            #return(cat["event"], cat["phase"])
-            return(cat["event"].iloc[:500], cat["phase"].iloc[:500]) #TODO:: DON'T FORGET TO TAKE 500 OUT
+            return(cat["event"], cat["phase"])
         else:
             return(cat["event"].loc[evids], cat["phase"].loc[evids])
 
@@ -149,15 +161,12 @@ def initialize_f5out(f5out, cfg):
 
     This is a collective operation.
     """
-    print("Initializing HDF5 output file metadata")
-
     with pd.HDFStore(args.events_in, "r") as f5in:
         df0_event = f5in["event"]
         df0_phase = f5in["phase"]
         for evid0 in df0_event.index:
             for evidB in get_knn(evid0, df0_event, k=cfg["knn"]).iloc[1:].index:
                 for _, arrival in get_phases((evid0, evidB), df0_phase).iterrows():
-                #for _, arrival in df0_phase.loc[.iterrows():
                     grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, arrival["sta"])
                     if grpid not in f5out:
                         grp = f5out.create_group(grpid)
@@ -168,7 +177,6 @@ def initialize_f5out(f5out, cfg):
                                               dtype="f",
                                               fillvalue=np.nan)
                     dset.attrs["chan"] = arrival["chan"]
-        print("Finished initializing HDF5 output file metadata")
 
 def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
     """
@@ -325,18 +333,24 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                     try:
                         f5out[grpid][phase][:] = (dbldiff, ccmean)
                     except:
-                        print(grpid, phase, dbldiff, ccmean)
+                        logger.info(grpid, phase, dbldiff, ccmean)
                         raise
-        print("correlated event ID#{:d} with ID#{:d} - elapsed time: "\
+        logger.info("correlated event ID#{:d} with ID#{:d} - elapsed time: "\
               "{:.2f} s".format(evid0, evidB, time.time()-log_tstart))
 
 def detect_python_version():
     if sys.version_info.major != 2:
-        print("Python2 is currently the only supported version of this code"
-              "Please use a Python2 interpreter")
+        logger.error("Python2 is currently the only supported version of this"
+                     "code. Please use a Python2 interpreter.")
+        exit()
 
 if __name__ == "__main__":
     args = parse_args()
     cfg = parse_config(args.config_file)
+    configure_logging(args.verbose, args.logfile)
     detect_python_version()
-    main(args, cfg)
+    try:
+        main(args, cfg)
+    except:
+        logger.error(traceback.print_tb(sys.exc_info()[2]))
+
