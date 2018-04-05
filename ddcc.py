@@ -21,6 +21,9 @@ import sys
 import time
 import traceback
 
+# for plotting
+import matplotlib.pyplot as plt
+
 logger = logging.getLogger(__name__)
 
 def parse_args():
@@ -47,29 +50,30 @@ def main(args, cfg):
 
         comm, rank, size, MPI = asdf_dset.mpi
 
+        logger.info("loading events to scatter")
+        df0_event, df0_phase = load_event_data(args.events_in)
+        logger.info("events loaded")
+
         if rank == 0:
-            logger.info("loading events to scatter")
-            df0_event, df0_phase = load_event_data(args.events_in)
-            logger.info("events loaded")
             data = np.array_split(df0_event.index, size)
         else:
             data = None
         logger.info("receiving scattered data")
         data = comm.scatter(data, root=0)
 
-        logger.info("loading event data to process")
-        df0_event, df0_phase = load_event_data(args.events_in, evids=data)
+        #logger.info("loading event data to process")
+        #df0_event, df0_phase = load_event_data(args.events_in, evids=data)
 
-        with h5py.File(args.corr_out, "w", driver="mpio", comm=comm) as f5out:
-            logger.info("initializing output file")
-            initialize_f5out(f5out, cfg)
+        #with h5py.File(args.corr_out, "w", driver="mpio", comm=comm) as f5out:
+        #    logger.info("initializing output file")
+        #    initialize_f5out(f5out, args, cfg)
+        with h5py.File(args.corr_out, "a", driver="mpio", comm=comm) as f5out:
+            logger.info("skipping output file initialion")
             for evid in data:
                 try:
                     correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg)
                 except Exception as err:
-                    logger.error(traceback.print_tb(sys.exc_info()[0]))
-                    logger.error(traceback.print_tb(sys.exc_info()[1]))
-                    logger.error(traceback.print_tb(sys.exc_info()[2]))
+                    logger.error(err)
     logger.info("process completed successfully")
 
 def parse_config(config_file):
@@ -81,7 +85,10 @@ def parse_config(config_file):
               "tlag_s"   : parser.getfloat("general", "tlag_s"),
               "corr_min" : parser.getfloat("general", "corr_min"),
               "ncorr_min": parser.getint(  "general", "ncorr_min"),
-              "knn"      : parser.getint(  "general", "knn")}
+              "knn"      : parser.getint(  "general", "knn"),
+              "vp"       : parser.getfloat("general", "vp"),
+              "vs"       : parser.getfloat("general", "vs"),
+              "twin"     : parser.getfloat("general", "twin")}
     return(config)
 
 
@@ -98,7 +105,7 @@ def configure_logging(verbose, logfile):
         logger.setLevel(level)
         if level == logging.DEBUG:
             formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
-                    "%(funcName)s()::%(process)d:: %(message)s",
+                    "%(funcName)s()::%(lineno)d::%(process)d:: %(message)s",
                     datefmt="%Y%j %H:%M:%S")
         else:
             formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
@@ -115,13 +122,13 @@ def configure_logging(verbose, logfile):
         logger.addHandler(stream_handler)
 
 def load_event_data(f5in, evids=None):
+    logger.debug(f5in)
     with pd.HDFStore(f5in) as cat:
+        logger.debug(len(cat["phase"]))
         if evids is None:
             return(cat["event"], cat["phase"])
         else:
             return(cat["event"].loc[evids], cat["phase"].loc[evids])
-
-
 
 def get_knn(evid, df_event, k=10):
     """
@@ -146,28 +153,42 @@ def get_phases(evids, df_phase):
 
     evids :: list of event IDs to retrieve phase data for.
     """
+    #return(
+    #    df_phase[
+    #        df_phase.index.isin(evids)
+    #    ].sort_index(
+    #    ).drop_duplicates(
+    #        ["evid", "sta", "iphase"]
+    #    ).sort_values(["sta", "iphase"])
+    #)
     return(
         df_phase[
             df_phase.index.isin(evids)
         ].sort_index(
-        ).drop_duplicates(
-            ["sta", "iphase"]
         ).sort_values(["sta", "iphase"])
     )
 
-def initialize_f5out(f5out, cfg):
+def initialize_f5out(f5out, args, cfg):
     """
     Initialize metadata structure for output HDF5 file.
 
     This is a collective operation.
     """
+    logger.debug(args.events_in)
     with pd.HDFStore(args.events_in, "r") as f5in:
         df0_event = f5in["event"]
         df0_phase = f5in["phase"]
         for evid0 in df0_event.index:
             for evidB in get_knn(evid0, df0_event, k=cfg["knn"]).iloc[1:].index:
-                for _, arrival in get_phases((evid0, evidB), df0_phase).iterrows():
+                df_phase = get_phases(
+                    (evid0, evidB),
+                    df0_phase
+                ).drop_duplicates(
+                    ["sta", "iphase"]
+                )
+                for _, arrival in df_phase.iterrows():
                     grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, arrival["sta"])
+                    logger.debug(grpid)
                     if grpid not in f5out:
                         grp = f5out.create_group(grpid)
                     else:
@@ -210,7 +231,7 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
     """
     # df_event :: DataFrame of K-nearest-neighbour events including
     #             primary event.
-    df_event = get_knn(evid, df0_event)
+    df_event = get_knn(evid, df0_event, k=cfg["knn"])
     df_phase = get_phases(df_event.index, df0_phase)
     # event0 :: primary event
     # evid0  :: primary event ID
@@ -227,6 +248,7 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
         # _df_phase :: DataFrame with arrival data for the primary and
         #              secondary events
         _df_phase = get_phases((evid0, evidB), df_phase=df_phase)
+        _df_phase = _df_phase.drop_duplicates(["sta", "iphase"])
 
         # measurements :: storage for double-difference and average
         #                 cross-correlation coefficient
@@ -236,7 +258,8 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
             #            this station:phase pair
             # ccmax   :: array of maximum cross-correlation
             #            coefficients for this station:phase pair
-            dbldiff, ccmax = [], []
+            # shift   :: for plotting
+            dbldiff, ccmax, shift = [], [], []
             try:
                 # st0 :: waveform Stream for primary event
                 # stB :: waveform Stream for secondary event
@@ -244,14 +267,16 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                                                      arrival["sta"])]["event%d" % evid0]
                 stB = asdf_dset.waveforms["%s.%s" % (arrival["snet"],
                                                      arrival["sta"])]["event%d" % evidB]
-            except KeyError as exc:
+            except KeyError as err:
+                #logger.debug(err)
                 continue
             # tr0 :: waveform Trace for primary event
             for tr0 in st0:
                 try:
                     # trB :: waveform Trace for secondary event
                     trB = stB.select(channel=tr0.stats.channel)[0]
-                except IndexError:
+                except IndexError as err:
+                    #logger.debug(err)
                     continue
                 # trX :: "template" trace; this is ideally the primary event Trace,
                 #        but the secondary event Trace will be used if the only
@@ -274,14 +299,18 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                     trX, trY = trB, tr0
                     otX, otY = otB, ot0
 
+                wavespeed = cfg["vp"] if arrival["iphase"] == "P" else cfg["vs"]
+                atY = arrival["dist"]/wavespeed
                 # slice the template trace
                 trX = trX.slice(starttime=atX-cfg["tlead_%s" % arrival["iphase"].lower()],
                                 endtime  =atX+cfg["tlag_%s" % arrival["iphase"].lower()])
-
+                trY = trY.slice(starttime=atY-cfg["twin"]/2,
+                                endtime  =atY+cfg["twin"]/2)
                 # error checking
                 min_nsamp = (cfg["tlead_%s" % arrival["iphase"].lower()]\
                            + cfg["tlag_%s" % arrival["iphase"].lower()]) * trX.stats.sampling_rate
                 if len(trX) < min_nsamp or len(trY) < min_nsamp:
+                    logger.debug("len(trX) < min_nsamp")
                     continue
 
                 # max shift :: the maximum shift to apply when cross-correlating
@@ -305,36 +334,69 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                 N            = int(len(trX)/2) # template half-width
                 corr         = op.signal.cross_correlation.correlate(trX, trY, max_shift)
                 clag, _ccmax = op.signal.cross_correlation.xcorr_max(corr)
-                shift        = max_shift-clag-N # peak cross-correlation lag in samples
+                _shift       = max_shift-clag-N # peak cross-correlation lag in samples
                 # dot    :: differential origin-time
                 # dat    :: differntial arrival-time
                 # ddiff  :: double-difference (differential travel-time)
                 dot   = (otY-otX)
-                dat   = (trY.stats.starttime+trY.stats.delta*shift)-atX
+                dat   = (trY.stats.starttime+trY.stats.delta*_shift)-atX
                 _dbldiff = dot-dat
 
                 if _ccmax >= cfg["corr_min"]:
                     dbldiff.append(_dbldiff)
                     ccmax.append(_ccmax)
+                    shift.append(_shift)
 
             if len(dbldiff) > 0:
-                if arrival["sta"] not in measurements:
-                    measurements[arrival["sta"]] = {}
-                measurements[arrival["sta"]][arrival["iphase"]] = {"dbldiff": np.average(dbldiff, weights=ccmax),
-                                                                   "ccmean" : np.mean(ccmax),
-                                                                   "chan"   : arrival["chan"]}
-        if len(measurements) >= cfg["ncorr_min"]:
-            for sta in sorted(measurements):
-                for phase in sorted(measurements[sta]):
-                    dbldiff = measurements[sta][phase]["dbldiff"]
-                    ccmean  = measurements[sta][phase]["ccmean"]
-                    chan    = measurements[sta][phase]["chan"]
-                    grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, sta)
-                    try:
-                        f5out[grpid][phase][:] = (dbldiff, ccmean)
-                    except:
-                        logger.info(grpid, phase, dbldiff, ccmean)
-                        raise
+                grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, arrival["sta"])
+                idxmax = np.argmax(ccmax)
+                dbldiff = dbldiff[idxmax]
+                ccmean = ccmax[idxmax]
+                #dbldiff = np.average(dbldiff, weights=ccmax)
+                #ccmean = np.mean(ccmax)
+                logger.debug("{:s}/{:s}: {:.2f}, {:.2f}".format(grpid,
+                                                                arrival["iphase"],
+                                                                dbldiff,
+                                                                ccmean))
+                try:
+                    f5out[grpid][arrival["iphase"]][:] = (dbldiff, ccmean)
+                except Exception as err:
+                    logger.error(err)
+                    raise
+################################################################################
+# This block is for plotting results for tests/tuning/debugging. It is
+# safe to completely comment out.
+            if len(shift) == 0:
+                continue
+            logger.debug("Plotting")
+            FIGDIR_ROOT = "/Users/malcolcw/tmp/figures"
+            FIGDIR = os.path.join(FIGDIR_ROOT, str(evid0), str(evidB))
+            if not os.path.isdir(FIGDIR):
+                os.makedirs(FIGDIR)
+
+            fig = plt.figure()
+            ax = fig.add_subplot(1, 1, 1)
+            if shift != []:
+                idxmax = np.argmax(ccmax)
+                ishift = int(np.round(shift[idxmax]))
+                _trY = trY[ishift:ishift+len(trX)]
+                _trY = _trY/np.max(np.abs(_trY))
+                ax.plot(_trY)
+            trX.normalize()
+            ax.plot(trX, "--", color="orange")
+            ax.text(0.05, 0.95,
+                    "\n".join([str(s) for s in shift]),
+                    ha="left",
+                    va="top",
+                    transform=ax.transAxes)
+            ax.set_xlim(0, len(trX))
+            plt.savefig(os.path.join(FIGDIR,
+                                     "{:s}.{:s}.{:d}.{:d}.png".format(arrival["sta"],
+                                                                      arrival["iphase"],
+                                                                      evid0,
+                                                                      evidB)))
+            plt.close()
+################################################################################
         logger.info("correlated event ID#{:d} with ID#{:d} - elapsed time: "\
               "{:.2f} s".format(evid0, evidB, time.time()-log_tstart))
 
@@ -351,6 +413,6 @@ if __name__ == "__main__":
     detect_python_version()
     try:
         main(args, cfg)
-    except:
-        logger.error(traceback.print_tb(sys.exc_info()[2]))
-
+    except Exception as err:
+        logger.error("I died")
+        logger.error(err)
