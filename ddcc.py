@@ -153,14 +153,6 @@ def get_phases(evids, df_phase):
 
     evids :: list of event IDs to retrieve phase data for.
     """
-    #return(
-    #    df_phase[
-    #        df_phase.index.isin(evids)
-    #    ].sort_index(
-    #    ).drop_duplicates(
-    #        ["evid", "sta", "iphase"]
-    #    ).sort_values(["sta", "iphase"])
-    #)
     return(
         df_phase[
             df_phase.index.isin(evids)
@@ -179,6 +171,7 @@ def initialize_f5out(f5out, args, cfg):
         df0_event = f5in["event"]
         df0_phase = f5in["phase"]
         for evid0 in df0_event.index:
+            logger.debug(str(evid0))
             for evidB in get_knn(evid0, df0_event, k=cfg["knn"]).iloc[1:].index:
                 df_phase = get_phases(
                     (evid0, evidB),
@@ -188,7 +181,6 @@ def initialize_f5out(f5out, args, cfg):
                 )
                 for _, arrival in df_phase.iterrows():
                     grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, arrival["sta"])
-                    logger.debug(grpid)
                     if grpid not in f5out:
                         grp = f5out.create_group(grpid)
                     else:
@@ -250,9 +242,6 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
         _df_phase = get_phases((evid0, evidB), df_phase=df_phase)
         _df_phase = _df_phase.drop_duplicates(["sta", "iphase"])
 
-        # measurements :: storage for double-difference and average
-        #                 cross-correlation coefficient
-        measurements = {}
         for _, arrival in _df_phase.iterrows():
             # dbldiff :: array of double-difference measurements for
             #            this station:phase pair
@@ -300,7 +289,7 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                     otX, otY = otB, ot0
 
                 wavespeed = cfg["vp"] if arrival["iphase"] == "P" else cfg["vs"]
-                atY = arrival["dist"]/wavespeed
+                atY = otY + arrival["dist"]/wavespeed
                 # slice the template trace
                 trX = trX.slice(starttime=atX-cfg["tlead_%s" % arrival["iphase"].lower()],
                                 endtime  =atX+cfg["tlag_%s" % arrival["iphase"].lower()])
@@ -310,7 +299,10 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                 min_nsamp = (cfg["tlead_%s" % arrival["iphase"].lower()]\
                            + cfg["tlag_%s" % arrival["iphase"].lower()]) * trX.stats.sampling_rate
                 if len(trX) < min_nsamp or len(trY) < min_nsamp:
-                    logger.debug("len(trX) < min_nsamp")
+                    logger.debug("len(trX), len(trY), min_nsamp: "\
+                                 "{:d}, {:d}, {:d}".format(len(trX),
+                                                           len(trY),
+                                                           min_nsamp))
                     continue
 
                 # max shift :: the maximum shift to apply when cross-correlating
@@ -331,72 +323,69 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                 #     trY: YYYYYYYYYYYYYYYYYYY
                 # Do the actual correlation
                 max_shift    = int(len(trY)/2)
-                N            = int(len(trX)/2) # template half-width
+                N            = int(len(trX)/2)
                 corr         = op.signal.cross_correlation.correlate(trX, trY, max_shift)
                 clag, _ccmax = op.signal.cross_correlation.xcorr_max(corr)
-                _shift       = max_shift-clag-N # peak cross-correlation lag in samples
+                shift        = max_shift-clag-N # peak cross-correlation lag in samples
                 # dot    :: differential origin-time
                 # dat    :: differntial arrival-time
                 # ddiff  :: double-difference (differential travel-time)
                 dot   = (otY-otX)
-                dat   = (trY.stats.starttime+trY.stats.delta*_shift)-atX
+                dat   = (trY.stats.starttime+trY.stats.delta*shift)-atX
                 _dbldiff = dot-dat
 
                 if _ccmax >= cfg["corr_min"]:
                     dbldiff.append(_dbldiff)
                     ccmax.append(_ccmax)
-                    shift.append(_shift)
-
-            if len(dbldiff) > 0:
-                grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, arrival["sta"])
-                idxmax = np.argmax(ccmax)
-                dbldiff = dbldiff[idxmax]
-                ccmean = ccmax[idxmax]
-                #dbldiff = np.average(dbldiff, weights=ccmax)
-                #ccmean = np.mean(ccmax)
-                logger.debug("{:s}/{:s}: {:.2f}, {:.2f}".format(grpid,
-                                                                arrival["iphase"],
-                                                                dbldiff,
-                                                                ccmean))
-                try:
-                    f5out[grpid][arrival["iphase"]][:] = (dbldiff, ccmean)
-                except Exception as err:
-                    logger.error(err)
-                    raise
 ################################################################################
 # This block is for plotting results for tests/tuning/debugging. It is
 # safe to completely comment out.
-            if len(shift) == 0:
-                continue
-            logger.debug("Plotting")
-            FIGDIR_ROOT = "/Users/malcolcw/tmp/figures"
-            FIGDIR = os.path.join(FIGDIR_ROOT, str(evid0), str(evidB))
-            if not os.path.isdir(FIGDIR):
-                os.makedirs(FIGDIR)
+                    PLOT = True
+                    if PLOT is True:
+                        logger.debug("Plotting")
+                        FIGDIR_ROOT = "/Users/malcolcw/tmp/figures"
+                        FIGDIR = os.path.join(FIGDIR_ROOT, str(evid0), str(evidB))
+                        if not os.path.isdir(FIGDIR):
+                            os.makedirs(FIGDIR)
 
-            fig = plt.figure()
-            ax = fig.add_subplot(1, 1, 1)
-            if shift != []:
-                idxmax = np.argmax(ccmax)
-                ishift = int(np.round(shift[idxmax]))
-                _trY = trY[ishift:ishift+len(trX)]
-                _trY = _trY/np.max(np.abs(_trY))
-                ax.plot(_trY)
-            trX.normalize()
-            ax.plot(trX, "--", color="orange")
-            ax.text(0.05, 0.95,
-                    "\n".join([str(s) for s in shift]),
-                    ha="left",
-                    va="top",
-                    transform=ax.transAxes)
-            ax.set_xlim(0, len(trX))
-            plt.savefig(os.path.join(FIGDIR,
-                                     "{:s}.{:s}.{:d}.{:d}.png".format(arrival["sta"],
-                                                                      arrival["iphase"],
-                                                                      evid0,
-                                                                      evidB)))
-            plt.close()
+                        fig = plt.figure()
+                        ax = fig.add_subplot(1, 1, 1)
+                        idxmax = np.argmax(ccmax)
+                        ishift = int(shift)
+                        _trY = trY[ishift:ishift+len(trX)]
+                        _trY = _trY/np.max(np.abs(_trY))
+                        ax.plot(_trY)
+                        trX.normalize()
+                        ax.plot(trX, "--", color="orange")
+                        ax.set_xlim(0, len(trX))
+                        ax.text(0.05, 0.95,
+                                "{:s}:{:s} {:.2f}".format(arrival["sta"],
+                                                          arrival["iphase"],
+                                                          _ccmax),
+                                ha="left",
+                                va="top",
+                                transform=ax.transAxes)
+                        plt.savefig(os.path.join(FIGDIR,
+                                                "{:s}.{:s}.{:d}.{:d}.png".format(arrival["sta"],
+                                                                                arrival["iphase"],
+                                                                                evid0,
+                                                                                evidB)))
+                        plt.close()
 ################################################################################
+            if len(dbldiff) > 0:
+                grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, arrival["sta"])
+                idxmax = np.argmax(np.abs(ccmax))
+                dbldiff = dbldiff[idxmax]
+                ccmax = ccmax[idxmax]
+                logger.debug("{:s}/{:s}: {:.2f}, {:.2f}".format(grpid,
+                                                                arrival["iphase"],
+                                                                dbldiff,
+                                                                ccmax))
+                try:
+                    f5out[grpid][arrival["iphase"]][:] = (dbldiff, ccmax)
+                except Exception as err:
+                    logger.error(err)
+                    raise
         logger.info("correlated event ID#{:d} with ID#{:d} - elapsed time: "\
               "{:.2f} s".format(evid0, evidB, time.time()-log_tstart))
 
