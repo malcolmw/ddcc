@@ -21,9 +21,6 @@ import sys
 import time
 import traceback
 
-# for plotting
-import matplotlib.pyplot as plt
-
 logger = logging.getLogger(__name__)
 
 def parse_args():
@@ -61,14 +58,11 @@ def main(args, cfg):
         logger.info("receiving scattered data")
         data = comm.scatter(data, root=0)
 
-        #logger.info("loading event data to process")
-        #df0_event, df0_phase = load_event_data(args.events_in, evids=data)
-
-        #with h5py.File(args.corr_out, "w", driver="mpio", comm=comm) as f5out:
-        #    logger.info("initializing output file")
-        #    initialize_f5out(f5out, args, cfg)
-        with h5py.File(args.corr_out, "a", driver="mpio", comm=comm) as f5out:
-            logger.info("skipping output file initialion")
+        with h5py.File(args.corr_out, "w", driver="mpio", comm=comm) as f5out:
+            logger.info("initializing output file")
+            initialize_f5out(f5out, args, cfg)
+        #with h5py.File(args.corr_out, "a", driver="mpio", comm=comm) as f5out:
+        #    logger.info("skipping output file initialion")
             for evid in data:
                 try:
                     correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg)
@@ -84,7 +78,6 @@ def parse_config(config_file):
               "tlag_p"   : parser.getfloat("general", "tlag_p"),
               "tlag_s"   : parser.getfloat("general", "tlag_s"),
               "corr_min" : parser.getfloat("general", "corr_min"),
-              "ncorr_min": parser.getint(  "general", "ncorr_min"),
               "knn"      : parser.getint(  "general", "knn"),
               "vp"       : parser.getfloat("general", "vp"),
               "vs"       : parser.getfloat("general", "vs"),
@@ -122,9 +115,7 @@ def configure_logging(verbose, logfile):
         logger.addHandler(stream_handler)
 
 def load_event_data(f5in, evids=None):
-    logger.debug(f5in)
     with pd.HDFStore(f5in) as cat:
-        logger.debug(len(cat["phase"]))
         if evids is None:
             return(cat["event"], cat["phase"])
         else:
@@ -166,12 +157,10 @@ def initialize_f5out(f5out, args, cfg):
 
     This is a collective operation.
     """
-    logger.debug(args.events_in)
     with pd.HDFStore(args.events_in, "r") as f5in:
         df0_event = f5in["event"]
         df0_phase = f5in["phase"]
         for evid0 in df0_event.index:
-            logger.debug(str(evid0))
             for evidB in get_knn(evid0, df0_event, k=cfg["knn"]).iloc[1:].index:
                 df_phase = get_phases(
                     (evid0, evidB),
@@ -223,76 +212,90 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
     """
     # df_event :: DataFrame of K-nearest-neighbour events including
     #             primary event.
+    # event0   :: primary event
+    # evid0    :: primary event ID
     df_event = get_knn(evid, df0_event, k=cfg["knn"])
     df_phase = get_phases(df_event.index, df0_phase)
-    # event0 :: primary event
-    # evid0  :: primary event ID
     event0 = df_event.iloc[0]
     evid0 = event0.name
     for evidB, eventB in df_event.iloc[1:].iterrows():
         # log_tstart :: for logging elapsed time
+        # ot0        :: origin time of the primary event
+        # otB        :: origin time of the secondary event
+        # _df_phase  :: DataFrame with arrival data for the primary and
+        #               secondary events
+        # __df_phase ::
         log_tstart = time.time()
-        # ot0 :: origin time of the primary event
-        # otB :: origin time of the secondary event
         ot0 = op.core.UTCDateTime(event0["time"])
         otB = op.core.UTCDateTime(eventB["time"])
 
-        # _df_phase :: DataFrame with arrival data for the primary and
-        #              secondary events
         _df_phase = get_phases((evid0, evidB), df_phase=df_phase)
-        _df_phase = _df_phase.drop_duplicates(["sta", "iphase"])
+        __df_phase = _df_phase.drop_duplicates(["sta", "iphase"])
 
-        for _, arrival in _df_phase.iterrows():
-            # dbldiff :: array of double-difference measurements for
+        for _, arrival in __df_phase.iterrows():
+            # ddiff   :: array of double-difference measurements for
             #            this station:phase pair
             # ccmax   :: array of maximum cross-correlation
             #            coefficients for this station:phase pair
             # shift   :: for plotting
-            dbldiff, ccmax, shift = [], [], []
+            # st0     :: waveform Stream for primary event
+            # stB     :: waveform Stream for secondary event
+            ddiff, ccmax = [], []
             try:
-                # st0 :: waveform Stream for primary event
-                # stB :: waveform Stream for secondary event
                 st0 = asdf_dset.waveforms["%s.%s" % (arrival["snet"],
                                                      arrival["sta"])]["event%d" % evid0]
                 stB = asdf_dset.waveforms["%s.%s" % (arrival["snet"],
                                                      arrival["sta"])]["event%d" % evidB]
             except KeyError as err:
-                #logger.debug(err)
                 continue
             # tr0 :: waveform Trace for primary event
+            # trB :: waveform Trace for secondary event
+            # trX :: "template" trace; this is ideally the primary event Trace,
+            #        but the secondary event Trace will be used if the only
+            #        arrival for this station:phase pair comes from the secondary
+            #        event
+            # trY :: "test" trace; this is ideally the secondary event Trace
+            # atX :: arrival-time of the template arrival
+            # otY :: origin-time of the "test" event
             for tr0 in st0:
                 try:
-                    # trB :: waveform Trace for secondary event
                     trB = stB.select(channel=tr0.stats.channel)[0]
                 except IndexError as err:
-                    #logger.debug(err)
                     continue
-                # trX :: "template" trace; this is ideally the primary event Trace,
-                #        but the secondary event Trace will be used if the only
-                #        arrival for this station:phase pair comes from the secondary
-                #        event
-                # trY :: "test" trace; this is ideally the secondary event Trace
-                # atX :: arrival-time of the template arrival
-                # otY :: origin-time of the "test" event
                 atX = op.core.UTCDateTime(arrival["time"])
                 if arrival.name == evid0:
                 # Do the calculation "forward".
                 # This means that the primary (earlier) event is used as the template
                 # trace.
-                    trX, trY = tr0, trB
-                    otX, otY = ot0, otB
+                    trX, trY     = tr0, trB
+                    otX, otY     = ot0, otB
+                    evidX, evidY = evid0, evidB
                 else:
                 # Do the calculation "backward".
                 # This means that the secondary (later) event is used as the template
                 # trace.
-                    trX, trY = trB, tr0
-                    otX, otY = otB, ot0
+                    trX, trY     = trB, tr0
+                    otX, otY     = otB, ot0
+                    evidX, evidY = evidB, evid0
 
-                wavespeed = cfg["vp"] if arrival["iphase"] == "P" else cfg["vs"]
-                atY = otY + arrival["dist"]/wavespeed
+                # Get the arrival time for the test trace. Use the
+                # from the database if one exists, otherwise do
+                # a simple arrival time prediction.
+                if evidY in _df_phase.index\
+                        and np.any((_df_phase.loc[evidY]["sta"]    == arrival["sta"])\
+                                  &(_df_phase.loc[evidY]["iphase"] == arrival["iphase"])):
+                    _df = _df_phase.loc[evidY]
+                    _arrival = _df[(_df["sta"] == arrival["sta"])
+                                  &(_df["iphase"] == arrival["iphase"])].iloc[0]
+                    atY = op.core.UTCDateTime(_arrival["time"])
+                else:
+                    wavespeed = cfg["vp"] if arrival["iphase"] == "P" else cfg["vs"]
+                    # This is the wrong distance.
+                    atY = otY + arrival["dist"]/wavespeed
                 # slice the template trace
                 trX = trX.slice(starttime=atX-cfg["tlead_%s" % arrival["iphase"].lower()],
                                 endtime  =atX+cfg["tlag_%s" % arrival["iphase"].lower()])
+                # slice the test trace
                 trY = trY.slice(starttime=atY-cfg["twin"]/2,
                                 endtime  =atY+cfg["twin"]/2)
                 # error checking
@@ -306,83 +309,52 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                     continue
 
                 # max shift :: the maximum shift to apply when cross-correlating
-                # N         :: the half-width (# of samples) of the template
                 # corr      :: the cross-correlation time-series
-                # clag      :: the lag of the maximum cross-correlation coefficient
-                #              relative to the middle of the test trace
+                # clag      :: the lag of the maximum cross-correlation
+                #              coefficient. 0 shift corresponds to the
+                #              case below where both traces are center-
+                #              aligned
                 #          ---------|+++++++++
                 #          9876543210123456789
                 #     trX: -------XXXXX-------
                 #     trY: YYYYYYYYYYYYYYYYYYY
                 # _ccmax    :: the maximum cross-correlation coefficient
-                # shift     :: the lag of the maximum cross-correlation coefficient
-                #              relative to the start of the test trace
-                #          |+++++++++
-                #          0123456789...
-                #     trX: XXXXX--------------
-                #     trY: YYYYYYYYYYYYYYYYYYY
+                # tshift    :: clag converted to units of time
+                # t0X       :: the center time of trX
+                # t0Y       :: the center time of trY
+                ## iet      :: inter-event time
+                ## iat      :: inter-arrival time
+                ## _ddiff   :: double-difference (differential travel-time)
                 # Do the actual correlation
-                max_shift    = int(len(trY)/2)
-                N            = int(len(trX)/2)
-                corr         = op.signal.cross_correlation.correlate(trX, trY, max_shift)
-                clag, _ccmax = op.signal.cross_correlation.xcorr_max(corr)
-                shift        = max_shift-clag-N # peak cross-correlation lag in samples
-                # dot    :: differential origin-time
-                # dat    :: differntial arrival-time
-                # ddiff  :: double-difference (differential travel-time)
-                dot   = (otY-otX)
-                dat   = (trY.stats.starttime+trY.stats.delta*shift)-atX
-                _dbldiff = dot-dat
-
-                if _ccmax >= cfg["corr_min"]:
-                    dbldiff.append(_dbldiff)
+                max_shift     = int(len(trY)/2)
+                corr          = op.signal.cross_correlation.correlate(trY,
+                                                                      trX,
+                                                                      max_shift)
+                clag, _ccmax  = op.signal.cross_correlation.xcorr_max(corr)
+                tshift        = clag * trY.stats.delta
+                t0X           = np.mean([trX.stats.starttime.timestamp,
+                                         trX.stats.endtime.timestamp])
+                t0Y           = np.mean([trY.stats.starttime.timestamp,
+                                         trY.stats.endtime.timestamp])
+                iet           = (otY-otX)
+                iat           = (t0Y-t0X+tshift)
+                _ddiff = iat-iet
+                # store values if the correlation is high
+                if abs(_ccmax) >= cfg["corr_min"]:
+                    ddiff.append(_ddiff)
                     ccmax.append(_ccmax)
-################################################################################
-# This block is for plotting results for tests/tuning/debugging. It is
-# safe to completely comment out.
-                    PLOT = True
-                    if PLOT is True:
-                        logger.debug("Plotting")
-                        FIGDIR_ROOT = "/Users/malcolcw/tmp/figures"
-                        FIGDIR = os.path.join(FIGDIR_ROOT, str(evid0), str(evidB))
-                        if not os.path.isdir(FIGDIR):
-                            os.makedirs(FIGDIR)
-
-                        fig = plt.figure()
-                        ax = fig.add_subplot(1, 1, 1)
-                        idxmax = np.argmax(ccmax)
-                        ishift = int(shift)
-                        _trY = trY[ishift:ishift+len(trX)]
-                        _trY = _trY/np.max(np.abs(_trY))
-                        ax.plot(_trY)
-                        trX.normalize()
-                        ax.plot(trX, "--", color="orange")
-                        ax.set_xlim(0, len(trX))
-                        ax.text(0.05, 0.95,
-                                "{:s}:{:s} {:.2f}".format(arrival["sta"],
-                                                          arrival["iphase"],
-                                                          _ccmax),
-                                ha="left",
-                                va="top",
-                                transform=ax.transAxes)
-                        plt.savefig(os.path.join(FIGDIR,
-                                                "{:s}.{:s}.{:d}.{:d}.png".format(arrival["sta"],
-                                                                                arrival["iphase"],
-                                                                                evid0,
-                                                                                evidB)))
-                        plt.close()
-################################################################################
-            if len(dbldiff) > 0:
+            # if cross-correlation was successful, output best value
+            if len(ddiff) > 0:
                 grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, arrival["sta"])
                 idxmax = np.argmax(np.abs(ccmax))
-                dbldiff = dbldiff[idxmax]
+                ddiff = ddiff[idxmax]
                 ccmax = ccmax[idxmax]
                 logger.debug("{:s}/{:s}: {:.2f}, {:.2f}".format(grpid,
                                                                 arrival["iphase"],
-                                                                dbldiff,
+                                                                ddiff,
                                                                 ccmax))
                 try:
-                    f5out[grpid][arrival["iphase"]][:] = (dbldiff, ccmax)
+                    f5out[grpid][arrival["iphase"]][:] = (ddiff, ccmax)
                 except Exception as err:
                     logger.error(err)
                     raise
