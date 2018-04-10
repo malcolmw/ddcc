@@ -19,6 +19,18 @@ If you haven't already, install [Anaconda](https://www.anaconda.com/download) or
 (py27) @maple>> conda install -c conda-forge obspy colorama pytest pip flake8 dill prov
 ```
 
+Note: For reasons that are not completely clear to me, sometimes the wrong version of libicu gets installed here; this is related to [ObsPy issue #1677 - ImportError: libicui18n.so.58 when importing Obspy (Anaconda)](https://github.com/obspy/obspy/issues/1677). Make sure you have version 58.x of *icu* installed:
+```bash
+(py27) @maple>> conda list icu
+# packages in environment at /Users/malcolcw/Local/anaconda3/envs/py27:
+#
+# Name                    Version                   Build  Channel
+icu                       58.2                 h9c2bf20_1
+```
+and install it if you have an older version:
+```bash
+(py27) @maple>> conda install icu=58.2
+```
 ## 4 - Install *mpi4py*
 First make sure that your *MPI* environment is properly initialized - skipping this step *should* (I haven't tested this) be fine if *MPI* is not already provided for you.
 ```bash
