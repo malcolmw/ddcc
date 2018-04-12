@@ -11,6 +11,7 @@ import argparse
 import ConfigParser as configparser
 import h5py
 import logging
+import mpi4py.MPI as MPI
 import numpy as np
 import obspy as op
 import obspy.signal.cross_correlation
@@ -25,27 +26,66 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("wfs_in", type=str, help="input ASDF waveform dataset.")
-    parser.add_argument("events_in", type=str, help="input event/phase data "\
-                                                    "HDFStore")
-    parser.add_argument("corr_out", type=str, help="output HDF5 file for "\
-                                                   "correlation results")
-    parser.add_argument("config_file", type=str, help="configuration file")
-    parser.add_argument('-l', '--logfile', type=str, help='log file')
-    parser.add_argument('-v', '--verbose', action='store_true', help='verbose')
+    parser.add_argument("wfs_in",      type=str,
+                                       nargs="?",
+                                       help="input ASDF waveform dataset.")
+    parser.add_argument("events_in",   type=str,
+                                       help="input event/phase data "\
+                                                      "HDFStore")
+    parser.add_argument("config_file", type=str,
+                                       help="configuration file")
+    parser.add_argument("-o", "--outfile",   type=str,
+                                             default="corr.h5",
+                                             help="output HDF5 file for "
+                                                  "correlation results")
+    parser.add_argument("-i", "--init_corr", action="store_true",
+                                             help="initialize correlation "
+                                                  "output file")
+    parser.add_argument("-l", "--logfile",   type=str,
+                                             help="log file")
+    parser.add_argument("-v", "--verbose",   action="store_true",
+                                             help="verbose")
     args = parser.parse_args()
-    not_found = [f for f in (args.wfs_in,
-                             args.events_in,
-                             args.config_file) if not os.path.isfile(f)]
-    if len(not_found) > 0:
-        raise(IOError("file(s) not found: {:s}".format(", ".join(not_found))))
+    #not_found = [f for f in (args.wfs_in,
+    #                         args.events_in,
+    #                         args.config_file) if f is not None
+    #                                           and not os.path.isfile(f)]
+
+    if args.init_corr is not True and not os.path.isfile(args.outfile):
+        print("Output file does not exist. Use -i option to intialize "
+              "it.")
+        exit()
+    elif args.init_corr is True:
+        print("Initializing output file - %s" % args.outfile)
+    else:
+        print("Skipping output file initialization")
+
+    args.correlate = True
+
+    if args.wfs_in is None:
+        print("No waveform file specified. Not correlating.")
+        args.correlate = False
     return(args)
 
 def main(args, cfg):
-    logger.info("starting process")
-    with pyasdf.ASDFDataSet(args.wfs_in, mode="r") as asdf_dset:
 
-        comm, rank, size, MPI = asdf_dset.mpi
+    comm = MPI.COMM_WORLD
+    rank, size = comm.Get_rank(), comm.Get_size()
+
+    logger.info("starting process - rank %d" % rank)
+
+    if args.init_corr:
+        with h5py.File(args.outfile, "w", driver="mpio", comm=comm) as f5out:
+            logger.info("initializing output file")
+            initialize_f5out(f5out, args, cfg)
+
+    if args.correlate is True:
+        logger.info("beginning to correlate")
+    else:
+        logger.info("not correlating")
+        exit()
+
+    with pyasdf.ASDFDataSet(args.wfs_in, mode="r") as asdf_dset:
 
         logger.info("loading events to scatter")
         df0_event, df0_phase = load_event_data(args.events_in)
@@ -58,17 +98,13 @@ def main(args, cfg):
         logger.info("receiving scattered data")
         data = comm.scatter(data, root=0)
 
-        with h5py.File(args.corr_out, "w", driver="mpio", comm=comm) as f5out:
-            logger.info("initializing output file")
-            initialize_f5out(f5out, args, cfg)
-        #with h5py.File(args.corr_out, "a", driver="mpio", comm=comm) as f5out:
-        #    logger.info("skipping output file initialion")
+        with h5py.File(args.outfile, "a", driver="mpio", comm=comm) as f5out:
             for evid in data:
                 try:
                     correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg)
                 except Exception as err:
                     logger.error(err)
-    logger.info("process completed successfully")
+    logger.info("successfully completed correlation")
 
 def parse_config(config_file):
     parser = configparser.ConfigParser()
@@ -174,6 +210,8 @@ def initialize_f5out(f5out, args, cfg):
                         grp = f5out.create_group(grpid)
                     else:
                         grp = f5out[grpid]
+                    logger.debug("{:s}/{:s}".format(grpid,
+                                                    arrival["iphase"]))
                     dset = grp.create_dataset(arrival["iphase"],
                                               (2,),
                                               dtype="f",
@@ -277,27 +315,28 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                     trX, trY     = trB, tr0
                     otX, otY     = otB, ot0
                     evidX, evidY = evidB, evid0
-
+                ttX = atX - otX
                 # Get the arrival time for the test trace. Use the
                 # from the database if one exists, otherwise do
                 # a simple arrival time prediction.
-                if evidY in _df_phase.index\
-                        and np.any((_df_phase.loc[evidY]["sta"]    == arrival["sta"])\
-                                  &(_df_phase.loc[evidY]["iphase"] == arrival["iphase"])):
-                    _df = _df_phase.loc[evidY]
-                    _arrival = _df[(_df["sta"] == arrival["sta"])
-                                  &(_df["iphase"] == arrival["iphase"])].iloc[0]
-                    atY = op.core.UTCDateTime(_arrival["time"])
-                else:
-                    wavespeed = cfg["vp"] if arrival["iphase"] == "P" else cfg["vs"]
-                    # This is the wrong distance.
-                    atY = otY + arrival["dist"]/wavespeed
+                #if evidY in _df_phase.index\
+                #        and np.any((_df_phase.loc[evidY]["sta"]    == arrival["sta"])\
+                #                  &(_df_phase.loc[evidY]["iphase"] == arrival["iphase"])):
+                #    _df = _df_phase.loc[evidY]
+                #    _arrival = _df[(_df["sta"] == arrival["sta"])
+                #                  &(_df["iphase"] == arrival["iphase"])].iloc[0]
+                #    atY = op.core.UTCDateTime(_arrival["time"])
+                #else:
+                #    wavespeed = cfg["vp"] if arrival["iphase"] == "P" else cfg["vs"]
+                #    # This is the wrong distance.
+                #    atY = otY + arrival["dist"]/wavespeed
+                atY = otY + ttX
                 # slice the template trace
                 trX = trX.slice(starttime=atX-cfg["tlead_%s" % arrival["iphase"].lower()],
                                 endtime  =atX+cfg["tlag_%s" % arrival["iphase"].lower()])
                 # slice the test trace
-                trY = trY.slice(starttime=atY-cfg["twin"]/2,
-                                endtime  =atY+cfg["twin"]/2)
+                trY = trY.slice(starttime=atY-cfg["tlead_%s" % arrival["iphase"].lower()],
+                                endtime  =atY+cfg["tlag_%s" % arrival["iphase"].lower()])
                 # error checking
                 min_nsamp = (cfg["tlead_%s" % arrival["iphase"].lower()]\
                            + cfg["tlag_%s" % arrival["iphase"].lower()]) * trX.stats.sampling_rate
@@ -336,11 +375,12 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                                          trX.stats.endtime.timestamp])
                 t0Y           = np.mean([trY.stats.starttime.timestamp,
                                          trY.stats.endtime.timestamp])
-                iet           = (otY-otX)
-                iat           = (t0Y-t0X+tshift)
-                _ddiff = iat-iet
+                #iet           = (otY-otX)
+                #iat           = (t0Y-t0X+tshift)
+                _ddiff = tshift
                 # store values if the correlation is high
                 if abs(_ccmax) >= cfg["corr_min"]:
+                #if _ccmax >= cfg["corr_min"]:
                     ddiff.append(_ddiff)
                     ccmax.append(_ccmax)
             # if cross-correlation was successful, output best value
