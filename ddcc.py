@@ -114,10 +114,7 @@ def parse_config(config_file):
               "tlag_p"   : parser.getfloat("general", "tlag_p"),
               "tlag_s"   : parser.getfloat("general", "tlag_s"),
               "corr_min" : parser.getfloat("general", "corr_min"),
-              "knn"      : parser.getint(  "general", "knn"),
-              "vp"       : parser.getfloat("general", "vp"),
-              "vs"       : parser.getfloat("general", "vs"),
-              "twin"     : parser.getfloat("general", "twin")}
+              "knn"      : parser.getint(  "general", "knn")}
     return(config)
 
 
@@ -184,7 +181,7 @@ def get_phases(evids, df_phase):
         df_phase[
             df_phase.index.isin(evids)
         ].sort_index(
-        ).sort_values(["sta", "iphase"])
+        ).sort_values(["sta", "phase"])
     )
 
 def initialize_f5out(f5out, args, cfg):
@@ -202,7 +199,7 @@ def initialize_f5out(f5out, args, cfg):
                     (evid0, evidB),
                     df0_phase
                 ).drop_duplicates(
-                    ["sta", "iphase"]
+                    ["sta", "phase"]
                 )
                 for _, arrival in df_phase.iterrows():
                     grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, arrival["sta"])
@@ -211,8 +208,8 @@ def initialize_f5out(f5out, args, cfg):
                     else:
                         grp = f5out[grpid]
                     logger.debug("{:s}/{:s}".format(grpid,
-                                                    arrival["iphase"]))
-                    dset = grp.create_dataset(arrival["iphase"],
+                                                    arrival["phase"]))
+                    dset = grp.create_dataset(arrival["phase"],
                                               (2,),
                                               dtype="f",
                                               fillvalue=np.nan)
@@ -241,7 +238,7 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
     df0_phase :: pandas.DataFrame
                  A DataFrame of all phase information in the dataset. The
                  DataFrame must be indexed by event ID and the columns must
-                 be arid, sta, chan, iphase, time, prefor, and snet.
+                 be arid, sta, chan, phase, time, prefor, and net.
 
     Returns:
     None
@@ -266,7 +263,7 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
         otB = op.core.UTCDateTime(eventB["time"])
 
         _df_phase = get_phases((evid0, evidB), df_phase=df_phase)
-        __df_phase = _df_phase.drop_duplicates(["sta", "iphase"])
+        __df_phase = _df_phase.drop_duplicates(["sta", "phase"])
 
         for _, arrival in __df_phase.iterrows():
             # ddiff   :: array of double-difference measurements for
@@ -278,9 +275,9 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
             # stB     :: waveform Stream for secondary event
             ddiff, ccmax = [], []
             try:
-                st0 = asdf_dset.waveforms["%s.%s" % (arrival["snet"],
+                st0 = asdf_dset.waveforms["%s.%s" % (arrival["net"],
                                                      arrival["sta"])]["event%d" % evid0]
-                stB = asdf_dset.waveforms["%s.%s" % (arrival["snet"],
+                stB = asdf_dset.waveforms["%s.%s" % (arrival["net"],
                                                      arrival["sta"])]["event%d" % evidB]
             except KeyError as err:
                 continue
@@ -319,25 +316,25 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                 # a simple arrival time prediction.
                 #if evidY in _df_phase.index\
                 #        and np.any((_df_phase.loc[evidY]["sta"]    == arrival["sta"])\
-                #                  &(_df_phase.loc[evidY]["iphase"] == arrival["iphase"])):
+                #                  &(_df_phase.loc[evidY]["phase"] == arrival["phase"])):
                 #    _df = _df_phase.loc[evidY]
                 #    _arrival = _df[(_df["sta"] == arrival["sta"])
-                #                  &(_df["iphase"] == arrival["iphase"])].iloc[0]
+                #                  &(_df["phase"] == arrival["phase"])].iloc[0]
                 #    atY = op.core.UTCDateTime(_arrival["time"])
                 #else:
-                #    wavespeed = cfg["vp"] if arrival["iphase"] == "P" else cfg["vs"]
+                #    wavespeed = cfg["vp"] if arrival["phase"] == "P" else cfg["vs"]
                 #    # This is the wrong distance.
                 #    atY = otY + arrival["dist"]/wavespeed
                 atY = otY + ttX
                 # slice the template trace
-                trX = trX.slice(starttime=atX-cfg["tlead_%s" % arrival["iphase"].lower()],
-                                endtime  =atX+cfg["tlag_%s" % arrival["iphase"].lower()])
+                trX = trX.slice(starttime=atX-cfg["tlead_%s" % arrival["phase"].lower()],
+                                endtime  =atX+cfg["tlag_%s" % arrival["phase"].lower()])
                 # slice the test trace
-                trY = trY.slice(starttime=atY-cfg["tlead_%s" % arrival["iphase"].lower()],
-                                endtime  =atY+cfg["tlag_%s" % arrival["iphase"].lower()])
+                trY = trY.slice(starttime=atY-cfg["tlead_%s" % arrival["phase"].lower()],
+                                endtime  =atY+cfg["tlag_%s" % arrival["phase"].lower()])
                 # error checking
-                min_nsamp = (cfg["tlead_%s" % arrival["iphase"].lower()]\
-                           + cfg["tlag_%s" % arrival["iphase"].lower()]) * trX.stats.sampling_rate
+                min_nsamp = (cfg["tlead_%s" % arrival["phase"].lower()]\
+                           + cfg["tlag_%s" % arrival["phase"].lower()]) * trX.stats.sampling_rate
                 if len(trX) < min_nsamp or len(trY) < min_nsamp:
                     logger.debug("len(trX), len(trY), min_nsamp: "\
                                  "{:d}, {:d}, {:d}".format(len(trX),
@@ -388,11 +385,11 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                 ddiff = ddiff[idxmax]
                 ccmax = ccmax[idxmax]
                 logger.debug("{:s}/{:s}: {:.2f}, {:.2f}".format(grpid,
-                                                                arrival["iphase"],
+                                                                arrival["phase"],
                                                                 ddiff,
                                                                 ccmax))
                 try:
-                    f5out[grpid][arrival["iphase"]][:] = (ddiff, ccmax)
+                    f5out[grpid][arrival["phase"]][:] = (ddiff, ccmax)
                 except Exception as err:
                     logger.error(err)
                     raise
