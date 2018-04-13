@@ -165,7 +165,7 @@ def get_knn(evid, df_event, k=10):
     evid :: event ID of primary event.
     k    :: number of nearest-neighbours to retrieve.
     """
-    lat0, lon0, depth0, time0, orid0 = df_event.loc[evid]
+    lat0, lon0, depth0, time0 = df_event.loc[evid][["lat", "lon", "depth", "time"]]
     _df = df_event.copy()
     _df = _df[_df.index >= evid]
     _df["distance"] = np.sqrt(
@@ -237,13 +237,11 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
     df0_event :: pandas.DataFrame
                  A DataFrame of all events in the dataset. The DataFrame
                  must be indexed by event ID and the columns must be
-                 lat, lon, depth, time, and orid - I think orid can be
-                 left out though.
+                 lat, lon, depth, and time.
     df0_phase :: pandas.DataFrame
                  A DataFrame of all phase information in the dataset. The
                  DataFrame must be indexed by event ID and the columns must
-                 be arid, orid, sta, chan, iphase, time, prefor, and snet -
-                 I think orid and prefor can be left out.
+                 be arid, sta, chan, iphase, time, prefor, and snet.
 
     Returns:
     None
