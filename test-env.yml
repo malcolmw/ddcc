@@ -1,4 +1,4 @@
-name: test-environment
+name: testenv_py27
 channels:
   - conda-forge
   - anaconda-nb-extensions
