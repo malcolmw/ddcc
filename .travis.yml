@@ -10,6 +10,6 @@
     - conda config --set always_yes yes --set changeps1 no
     - conda update -q conda
     - conda info -a
-    - conda create -q -n test-environment python=$TRAVIS_PYTHON_VERSION -f test-env.yml
+    - conda create -f test-env.yml
     - source activate test-environment
   script: true
