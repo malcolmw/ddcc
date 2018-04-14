@@ -1,4 +1,4 @@
-name: test-nevironment
+name: test-environment
 channels:
   - conda-forge
   - anaconda-nb-extensions
