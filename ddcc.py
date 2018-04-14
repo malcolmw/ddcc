@@ -200,6 +200,7 @@ def append_f5out(f5out, args, cfg):
         df0_event = f5in["event"]
         df0_phase = f5in["phase"]
         for evid0 in df0_event.index:
+            logger.info("initializing output for {:d}".format(evid0))
             for evidB in get_knn(evid0, df0_event, k=cfg["knn"]).iloc[1:].index:
                 df_phase = get_phases(
                     (evid0, evidB),
