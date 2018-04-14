@@ -13,6 +13,7 @@
     - conda create -q -n testenv
     - source activate testenv
     - conda install -q -c conda-forge openmpi
+    #
     # Install HDF5
     - wget https://support.hdfgroup.org/ftp/HDF5/current/src/hdf5-1.10.1.tar.gz
     - tar -xzf hdf5-1.10.1.tar.gz
@@ -21,7 +22,16 @@
     - ./configure --enable-parallel --enable-shared
     - make
     - make install
-
+    #
+    # Install mpi4py
+    - pip install mpi4py
+    #
+    # Install h5py
+    - wget https://pypi.python.org/packages/34/07/4f8f6e4e478e9eabde25dea6b4478016e625b2dac6aaded78ba0316c86fe/h5py-2.8.0rc1.tar.gz#md5=845d6c24d08453f869a822038886c7b7
+    - tar -xzf h5py-2.8.0rc1.tar.gz
+    - cd h5py-2.8.0rc1
+    - python setup.py configure --mpi --hdf5=../hdf5-1.10.1/hdf5
+    - pip install -e .
 
 #    - wget https://repo.continuum.io/miniconda/Miniconda2-latest-Linux-x86_64.sh -O miniconda.sh
 #    - bash miniconda.sh -b -p $HOME/miniconda
