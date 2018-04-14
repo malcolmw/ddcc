@@ -12,7 +12,7 @@
     - conda info -a
     - conda create -q -n testenv
     - source activate testenv
-    - conda install openmpi
+    - conda install -q -c conda-forge openmpi
     # Install HDF5
     - wget https://support.hdfgroup.org/ftp/HDF5/current/src/hdf5-1.10.1.tar.gz
     - tar -xzf hdf5-1.10.1.tar.gz
