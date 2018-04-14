@@ -34,22 +34,21 @@ def parse_args():
                                                       "HDFStore")
     parser.add_argument("config_file", type=str,
                                        help="configuration file")
+    parser.add_argument("-i", "--init_corr", action="store_true",
+                                             help="initialize correlation "
+                                                  "output file")
+    parser.add_argument("-a", "--append_corr", action="store_true",
+                                               help="initialize correlation "
+                                                    "output file")
     parser.add_argument("-o", "--outfile",   type=str,
                                              default="corr.h5",
                                              help="output HDF5 file for "
                                                   "correlation results")
-    parser.add_argument("-i", "--init_corr", action="store_true",
-                                             help="initialize correlation "
-                                                  "output file")
     parser.add_argument("-l", "--logfile",   type=str,
                                              help="log file")
     parser.add_argument("-v", "--verbose",   action="store_true",
                                              help="verbose")
     args = parser.parse_args()
-    #not_found = [f for f in (args.wfs_in,
-    #                         args.events_in,
-    #                         args.config_file) if f is not None
-    #                                           and not os.path.isfile(f)]
 
     if args.init_corr is not True and not os.path.isfile(args.outfile):
         print("Output file does not exist. Use -i option to intialize "
@@ -57,6 +56,8 @@ def parse_args():
         exit()
     elif args.init_corr is True:
         print("Initializing output file - %s" % args.outfile)
+    elif args.append_corr is True:
+        print("Appending to output file - %s" % args.outfile)
     else:
         print("Skipping output file initialization")
 
@@ -78,6 +79,11 @@ def main(args, cfg):
         with h5py.File(args.outfile, "w", driver="mpio", comm=comm) as f5out:
             logger.info("initializing output file")
             initialize_f5out(f5out, args, cfg)
+    elif args.append_corr:
+        logger.debug(args.outfile)
+        with h5py.File(args.outfile, "a", driver="mpio", comm=comm) as f5out:
+            logger.info("appending to output file")
+            append_f5out(f5out, args, cfg)
 
     if args.correlate is True:
         logger.info("beginning to correlate")
@@ -183,6 +189,38 @@ def get_phases(evids, df_phase):
         ].sort_index(
         ).sort_values(["sta", "phase"])
     )
+
+def append_f5out(f5out, args, cfg):
+    """
+    Append metadata structure for output HDF5 file.
+
+    This is a collective operation.
+    """
+    with pd.HDFStore(args.events_in, "r") as f5in:
+        df0_event = f5in["event"]
+        df0_phase = f5in["phase"]
+        for evid0 in df0_event.index:
+            for evidB in get_knn(evid0, df0_event, k=cfg["knn"]).iloc[1:].index:
+                df_phase = get_phases(
+                    (evid0, evidB),
+                    df0_phase
+                ).drop_duplicates(
+                    ["sta", "phase"]
+                )
+                for _, arrival in df_phase.iterrows():
+                    dsid = "{:d}/{:d}/{:s}/{:s}".format(evid0,
+                                                        evidB,
+                                                        arrival["sta"],
+                                                        arrival["phase"])
+                    if dsid not in f5out:
+                        dset = f5out.create_dataset(dsid,
+                                                    (2,),
+                                                    dtype="f",
+                                                    fillvalue=np.nan)
+                        dset.attrs["chan"] = arrival["chan"]
+                        logger.debug(dsid)
+                    else:
+                        logger.debug("{:s} already exists".format(dsid))
 
 def initialize_f5out(f5out, args, cfg):
     """
