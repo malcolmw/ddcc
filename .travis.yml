@@ -52,4 +52,5 @@
     - pip install -q --no-binary=tables --no-deps tables
     - pip install -q --no-binary=numexpr --no-deps numexpr
     - pip install -q --no-binary=pandas --no-deps pandas
-  script: true
+  script:
+    - python -m pyasdf.tests
