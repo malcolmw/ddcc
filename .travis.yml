@@ -12,9 +12,12 @@
     - conda info -a
     - conda create -q -n testenv
     - source activate testenv
-    - conda install -q -c conda-forge openmpi
+    # Install mpi4py
+    - conda install -q -c conda-forge mpi4py
+    # - pip install mpi4py
     #
     # Install HDF5
+    - cd $TRAVIS_BUILD_DIR
     - wget https://support.hdfgroup.org/ftp/HDF5/current/src/hdf5-1.10.1.tar.gz
     - tar -xzf hdf5-1.10.1.tar.gz
     - cd hdf5-1.10.1
@@ -22,24 +25,23 @@
     - ./configure --enable-parallel --enable-shared
     - make
     - make install
-    #
-    # Install mpi4py
-    - pip install mpi4py
+    - export HDF5_DIR="$TRAVIS_BUILD_DIR/hdf5-1.10.1/hdf5"
     #
     # Install h5py
+    - cd $TRAVIS_BUILD_DIR
     - wget https://pypi.python.org/packages/34/07/4f8f6e4e478e9eabde25dea6b4478016e625b2dac6aaded78ba0316c86fe/h5py-2.8.0rc1.tar.gz#md5=845d6c24d08453f869a822038886c7b7
     - tar -xzf h5py-2.8.0rc1.tar.gz
     - cd h5py-2.8.0rc1
-    - python setup.py configure --mpi --hdf5=../hdf5-1.10.1/hdf5
+    - python setup.py configure --mpi --hdf5=$HDF5_DIR
     - pip install -e .
-
-#    - wget https://repo.continuum.io/miniconda/Miniconda2-latest-Linux-x86_64.sh -O miniconda.sh
-#    - bash miniconda.sh -b -p $HOME/miniconda
-#    - export PATH="$HOME/miniconda/bin:$PATH"
-#    - hash -r
-#    - conda config --set always_yes yes --set changeps1 no
-#    - conda update -q conda
-#    - conda info -a
-#    - conda create -q -n testenv_py27 --file test-env.yml
-#    - source activate testenv_py27
+    #
+    # Install pyasdf dependencies and remaining dependencies
+    - cd $TRAVIS_BUILD_DIR
+    - conda install -q -c conda-forge obspy colorama pytest flake8 dill prov
+    - pip install pyasdf
+    #
+    # Install pandas and pytables
+    - pip install --no-binary=tables --no-deps tables
+    - pip install --no-binary=numexpr --no-deps numexpr
+    - pip install --no-binary=pandas --no-deps pandas
   script: true
