@@ -1,8 +1,6 @@
 """
 This script was tested with Python2.7.14, because the core dependency
 (pyasdf) is not yet (04/02/2018) stable under python3.
-
-TODO:: logging
 """
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)

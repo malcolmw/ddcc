@@ -1,0 +1,55 @@
+  language: python
+  python:
+    - "2.7"
+  install:
+    # Define download URLs
+    - export HDF5_URL="https://support.hdfgroup.org/ftp/HDF5/current/src/hdf5-1.10.1.tar.gz"
+    - export HDF5_VERSION="1.10.1"
+    - export H5PY_URL="https://pypi.python.org/packages/34/07/4f8f6e4e478e9eabde25dea6b4478016e625b2dac6aaded78ba0316c86fe/h5py-2.8.0rc1.tar.gz#md5=845d6c24d08453f869a822038886c7b7"
+    - export H5PY_VERSION="2.8.0rc1"
+    - export MINICONDA_URL="https://repo.continuum.io/miniconda/Miniconda2-latest-Linux-x86_64.sh"
+    #
+    # Create and activate a test environment
+    - sudo apt-get update
+    - wget $MINICONDA_URL -O miniconda.sh
+    - bash miniconda.sh -b -p $HOME/miniconda
+    - export PATH="$HOME/miniconda/bin:$PATH"
+    - hash -r
+    - conda config --set always_yes yes --set changeps1 no
+    - conda update -q conda
+    - conda info -a
+    - conda create -q -n testenv
+    - source activate testenv
+    #
+    # Install mpi4py
+    - conda install -q -c conda-forge mpi4py
+    #
+    # Install HDF5
+    - cd $TRAVIS_BUILD_DIR
+    - wget $HDF5_URL
+    - tar -xzf hdf5-${HDF5_VERSION}.tar.gz
+    - cd hdf5-${HDF5_VERSION}
+    - export CC=$(which mpicc)
+    - ./configure --enable-parallel --enable-shared
+    - make
+    - make install
+    - export HDF5_DIR="$TRAVIS_BUILD_DIR/hdf5-${HDF5_VERSION}/hdf5"
+    #
+    # Install h5py
+    - cd $TRAVIS_BUILD_DIR
+    - wget $H5PY_URL
+    - tar -xzf h5py-${H5PY_VERSION}.tar.gz
+    - cd h5py-${H5PY_VERSION}
+    - python setup.py configure --mpi --hdf5=$HDF5_DIR
+    - pip install -q -e .
+    #
+    # Install pyasdf dependencies and remaining dependencies
+    - cd $TRAVIS_BUILD_DIR
+    - conda install -q -c conda-forge obspy colorama pytest flake8 dill prov
+    - pip install -q pyasdf
+    #
+    # Install pandas and pytables
+    - pip install -q --no-binary=tables --no-deps tables
+    - pip install -q --no-binary=numexpr --no-deps numexpr
+    - pip install -q --no-binary=pandas --no-deps pandas
+  script: true
