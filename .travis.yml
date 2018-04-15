@@ -33,15 +33,15 @@
     - tar -xzf h5py-2.8.0rc1.tar.gz
     - cd h5py-2.8.0rc1
     - python setup.py configure --mpi --hdf5=$HDF5_DIR
-    - pip install -e .
+    - pip install -q -e .
     #
     # Install pyasdf dependencies and remaining dependencies
     - cd $TRAVIS_BUILD_DIR
     - conda install -q -c conda-forge obspy colorama pytest flake8 dill prov
-    - pip install pyasdf
+    - pip install -q pyasdf
     #
     # Install pandas and pytables
-    - pip install --no-binary=tables --no-deps tables
-    - pip install --no-binary=numexpr --no-deps numexpr
-    - pip install --no-binary=pandas --no-deps pandas
+    - pip install -q --no-binary=tables --no-deps tables
+    - pip install -q --no-binary=numexpr --no-deps numexpr
+    - pip install -q --no-binary=pandas --no-deps pandas
   script: true
