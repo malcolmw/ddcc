@@ -20,6 +20,9 @@ import sys
 import time
 import traceback
 
+COMM = MPI.COMM_WORLD
+RANK, SIZE = COMM.Get_rank(), COMM.Get_size()
+
 logger = logging.getLogger(__name__)
 
 def parse_args():
@@ -52,19 +55,16 @@ def parse_args():
 
 def main(args, cfg):
 
-    COMM = MPI.COMM_WORLD
-    rank, size = COMM.Get_rank(), COMM.Get_size()
-
-    logger.info("starting process - rank %d" % rank)
+    logger.info("starting process - rank %d" % RANK)
 
     with pyasdf.ASDFDataSet(args.wfs_in, mode="r") as asdf_dset:
 
-        logger.info("loading events to scatter")
+        logger.info("loading event and phase data ")
         df0_event, df0_phase = load_event_data(args.events_in)
-        logger.info("events loaded")
+        logger.info("event and phase data loaded")
 
-        if rank == 0:
-            data = np.array_split(df0_event.index, size)
+        if RANK == 0:
+            data = np.array_split(df0_event.index, SIZE)
         else:
             data = None
         logger.info("receiving scattered data")
@@ -111,11 +111,11 @@ def configure_logging(verbose, logfile):
         logger.setLevel(level)
         if level == logging.DEBUG:
             formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
-                    "%(funcName)s()::%(lineno)d::%(process)d:: %(message)s",
+                    "%(funcName)s()::%(lineno)d::{:d}:: %(message)s".format(RANK),
                     datefmt="%Y%j %H:%M:%S")
         else:
             formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
-                    " %(message)s",
+                    "::{:d}:: %(message)s".format(RANK),
                     datefmt="%Y%j %H:%M:%S")
         if logfile is not None:
             file_handler = logging.FileHandler(logfile)
@@ -128,7 +128,7 @@ def configure_logging(verbose, logfile):
         logger.addHandler(stream_handler)
 
 def load_event_data(f5in, evids=None):
-    with pd.HDFStore(f5in) as cat:
+    with pd.HDFStore(f5in, mode="r") as cat:
         if evids is None:
             return(cat["event"], cat["phase"])
         else:
