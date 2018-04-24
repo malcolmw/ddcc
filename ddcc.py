@@ -134,6 +134,23 @@ def load_event_data(f5in, evids=None):
         else:
             return(cat["event"].loc[evids], cat["phase"].loc[evids])
 
+def get_waveforms(asdf, tag):
+    f5 = asdf._ASDFDataSet__file
+    st = op.Stream()
+    label = "/Tags/%s" % tag
+    for station_name in f5[label]:
+        _label = "%s/%s" % (label, station_name)
+        for channel in f5[_label]:
+            __label = "%s/%s" % (_label, channel)
+            ds = f5[__label]
+            tr                  = op.Trace(data=ds[:])
+            tr.stats.samplerate = ds.attrs["sampling_rate"]
+            tr.stats.starttime  = op.UTCDateTime(ds.attrs["starttime"]*1e-9)
+            tr.stats.network, tr.stats.station = station_name.split(".")
+            tr.stats.channel    = channel
+            st.append(tr)
+    return(st)
+
 def get_knn(evid, df_event, k=10):
     """
     Get the K nearest-neighbour events.
