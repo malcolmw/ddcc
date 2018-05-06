@@ -20,6 +20,8 @@ import sys
 import time
 import traceback
 
+WRITER_RANK = 0
+
 COMM = MPI.COMM_WORLD
 RANK, SIZE = COMM.Get_rank(), COMM.Get_size()
 
@@ -63,27 +65,34 @@ def main(args, cfg):
         df0_event, df0_phase = load_event_data(args.events_in)
         logger.info("event and phase data loaded")
 
-        if RANK == 0:
-            data = np.array_split(df0_event.index, SIZE)
-        else:
-            data = None
-        logger.info("receiving scattered data")
-        data = COMM.scatter(data, root=0)
+        if RANK == WRITER_RANK:
+            #data = np.array_split(df0_event.index, SIZE-1)
+            for _rank, _data in zip([i for i in range(SIZE) if i != WRITER_RANK],
+                                    np.array_split(df0_event.index, SIZE-1)):
+                COMM.send(_data, _rank)
+            mode = "w" if args.write is True else "a"
+            with h5py.File(args.outfile, mode) as f5:
+                write_loop(f5)
+            exit()
 
-        mode = "w" if args.write is True else "a"
-        with h5py.File(args.outfile, mode, driver="mpio", comm=COMM) as f5out:
-            for evid in data:
-                try:
-                    correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg)
-                except Exception as err:
-                    logger.error(err)
+        logger.info("receiving scattered data")
+        data = COMM.recv()
+        logger.debug(data)
+
+        for evid in data:
+            logger.debug("correlating %d" % evid)
+            try:
+                correlate(evid, asdf_dset, df0_event, df0_phase, cfg)
+            except Exception as err:
+                logger.error(err)
             # Loop and participate in collective write operations until
             # all processes are finished.
-            while True:
-                data = COMM.allgather(StopIteration)
-                if np.all([d is StopIteration for d in data]):
-                    break
-                write_corr(f5out, data)
+            #while True:
+            #    data = COMM.allgather(StopIteration)
+            #    if np.all([d is StopIteration for d in data]):
+            #        break
+            #    write_corr(f5out, data)
+        COMM.send(StopIteration, WRITER_RANK)
     logger.info("successfully completed correlation")
 
 def parse_config(config_file):
@@ -277,7 +286,7 @@ def initialize_f5out(f5out, args, cfg):
                                               fillvalue=np.nan)
                     dset.attrs["chan"] = arrival["chan"]
 
-def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
+def correlate(evid, asdf_dset, df0_event, df0_phase, cfg):
     """
     Correlate an event with its K nearest-neighbours.
 
@@ -483,12 +492,32 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                     data = None
 
                 __t = time.time()
-                data = COMM.allgather(data)
-                write_corr(f5out, data)
+                COMM.send(data, WRITER_RANK)
+                #data = COMM.allgather(data)
+                #write_corr(f5out, data)
                 logger.debug("writing took %.5f seconds" % (time.time() - __t))
 
         logger.info("correlated event ID#{:d} with ID#{:d} - elapsed time: "\
               "{:.2f} s".format(evid0, evidB, time.time()-log_tstart))
+
+def write_loop(f5):
+    _stop_count = 0
+    while True:
+        if _stop_count == SIZE-1:
+            return
+        _data = COMM.recv()
+        if _data is StopIteration:
+            _stop_count += 1
+            print(StopIteration, _stop_count)
+            continue
+        elif _data["dsid"] in f5:
+            f5[_data["dsid"]][:] = (_data["ddiff"],
+                                    _data["ccmax"])
+        else:
+            dset = f5.create_dataset(_data["dsid"],
+                                     data=np.array([_data["ddiff"],
+                                                    _data["ccmax"]]))
+        f5[_data["dsid"]].attrs["chan"] = _data["chan"]
 
 def write_corr(f5out, data):
     for _data in data:
