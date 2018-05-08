@@ -20,6 +20,8 @@ import sys
 import time
 import traceback
 
+WRITER_RANK = 0
+
 COMM = MPI.COMM_WORLD
 RANK, SIZE = COMM.Get_rank(), COMM.Get_size()
 
@@ -43,7 +45,7 @@ def parse_args():
     parser.add_argument("-w", "--write",
                         action="store_true",
                         help="open output HDF5 file in write mode, "\
-                             "nuke any existing file") 
+                             "nuke any existing file")
     parser.add_argument("-l", "--logfile",
                         type=str,
                         help="log file")
@@ -63,27 +65,34 @@ def main(args, cfg):
         df0_event, df0_phase = load_event_data(args.events_in)
         logger.info("event and phase data loaded")
 
-        if RANK == 0:
-            data = np.array_split(df0_event.index, SIZE)
-        else:
-            data = None
-        logger.info("receiving scattered data")
-        data = COMM.scatter(data, root=0)
+        if RANK == WRITER_RANK:
+            #data = np.array_split(df0_event.index, SIZE-1)
+            for _rank, _data in zip([i for i in range(SIZE) if i != WRITER_RANK],
+                                    np.array_split(df0_event.index, SIZE-1)):
+                COMM.send(_data, _rank)
+            mode = "w" if args.write is True else "a"
+            with h5py.File(args.outfile, mode) as f5:
+                write_loop(f5)
+            exit()
 
-        mode = "w" if args.write is True else "a"
-        with h5py.File(args.outfile, mode, driver="mpio", comm=COMM) as f5out:
-            for evid in data:
-                try:
-                    correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg)
-                except Exception as err:
-                    logger.error(err)
+        logger.info("receiving scattered data")
+        data = COMM.recv()
+        logger.debug(data)
+
+        for evid in data:
+            logger.debug("correlating %d" % evid)
+            try:
+                correlate(evid, asdf_dset, df0_event, df0_phase, cfg)
+            except Exception as err:
+                logger.error(err)
             # Loop and participate in collective write operations until
             # all processes are finished.
-            while True:
-                data = COMM.allgather(StopIteration)
-                if np.all([d is StopIteration for d in data]):
-                    break
-                write_corr(f5out, data)
+            #while True:
+            #    data = COMM.allgather(StopIteration)
+            #    if np.all([d is StopIteration for d in data]):
+            #        break
+            #    write_corr(f5out, data)
+        COMM.send(StopIteration, WRITER_RANK)
     logger.info("successfully completed correlation")
 
 def parse_config(config_file):
@@ -133,6 +142,55 @@ def load_event_data(f5in, evids=None):
             return(cat["event"], cat["phase"])
         else:
             return(cat["event"].loc[evids], cat["phase"].loc[evids])
+
+def get_waveforms_for_reference(asdf, ref, net, sta):
+    _f5 = asdf._ASDFDataSet__file
+    _st = op.Stream()
+    _label = "/".join(("/References", ref, net, sta))
+    for _loc in _f5[_label]:
+        for _chan in _f5["/".join((_label, _loc))]:
+            _handle = "/".join((_label, _loc, _chan))
+            _ref = _f5[_handle]
+            _ds = _f5[_ref.attrs["reference_path"]]
+            _tr                  = op.Trace(data=_ds[_ref[0]: _ref[1]])
+            _tr.stats.delta      = 1./_ds.attrs["sampling_rate"]
+            _tr.stats.starttime  = op.UTCDateTime(_ref.attrs["starttime"]*1e-9)
+            _tr.stats.network    = net
+            _tr.stats.station    = sta
+            _tr.stats.location   = _loc if _loc != "__" else ""
+            _tr.stats.channel    = _chan
+            _st.append(_tr)
+    return(_st)
+
+    #for station_name in f5[label]:
+    #    _label = "%s/%s" % (label, station_name)
+    #    for channel in f5[_label]:
+    #        __label = "%s/%s" % (_label, channel)
+    #        ds = f5[__label]
+    #        tr                  = op.Trace(data=ds[:])
+    #        tr.stats.samplerate = ds.attrs["sampling_rate"]
+    #        tr.stats.starttime  = op.UTCDateTime(ds.attrs["starttime"]*1e-9)
+    #        tr.stats.network, tr.stats.station = station_name.split(".")
+    #        tr.stats.channel    = channel
+    #        st.append(tr)
+    #return(st)
+
+def get_waveforms_dep(asdf, tag):
+    f5 = asdf._ASDFDataSet__file
+    st = op.Stream()
+    label = "/Tags/%s" % tag
+    for station_name in f5[label]:
+        _label = "%s/%s" % (label, station_name)
+        for channel in f5[_label]:
+            __label = "%s/%s" % (_label, channel)
+            ds = f5[__label]
+            tr                  = op.Trace(data=ds[:])
+            tr.stats.samplerate = ds.attrs["sampling_rate"]
+            tr.stats.starttime  = op.UTCDateTime(ds.attrs["starttime"]*1e-9)
+            tr.stats.network, tr.stats.station = station_name.split(".")
+            tr.stats.channel    = channel
+            st.append(tr)
+    return(st)
 
 def get_knn(evid, df_event, k=10):
     """
@@ -228,7 +286,7 @@ def initialize_f5out(f5out, args, cfg):
                                               fillvalue=np.nan)
                     dset.attrs["chan"] = arrival["chan"]
 
-def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
+def correlate(evid, asdf_dset, df0_event, df0_phase, cfg):
     """
     Correlate an event with its K nearest-neighbours.
 
@@ -289,10 +347,22 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
             # stB     :: waveform Stream for secondary event
             ddiff, ccmax = [], []
             try:
-                st0 = asdf_dset.waveforms["%s.%s" % (arrival["net"],
-                                                     arrival["sta"])]["event%d" % evid0]
-                stB = asdf_dset.waveforms["%s.%s" % (arrival["net"],
-                                                     arrival["sta"])]["event%d" % evidB]
+                #st0 = asdf_dset.waveforms["%s.%s" % (arrival["net"],
+                #                                     arrival["sta"])]["event%d" % evid0]
+                #stB = asdf_dset.waveforms["%s.%s" % (arrival["net"],
+                #                                     arrival["sta"])]["event%d" % evidB]
+                __t = time.time()
+                st0 = get_waveforms_for_reference(asdf_dset,
+                                                  "event%d" % evid0,
+                                                  arrival["net"],
+                                                  arrival["sta"])
+                logger.debug("waveform retrieval took %.5f seconds" % (time.time()-__t))
+                __t = time.time()
+                stB = get_waveforms_for_reference(asdf_dset,
+                                                  "event%d" % evidB,
+                                                  arrival["net"],
+                                                  arrival["sta"])
+                logger.debug("waveform retrieval took %.5f seconds" % (time.time()-__t))
             except KeyError as err:
                 continue
             # tr0 :: waveform Trace for primary event
@@ -348,13 +418,16 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                     trY = trY.slice(starttime=atY-cfg["tlead_%s" % arrival["phase"].lower()],
                                     endtime  =atY+cfg["tlag_%s" % arrival["phase"].lower()])
                     # error checking
-                    min_nsamp = (cfg["tlead_%s" % arrival["phase"].lower()]\
-                            + cfg["tlag_%s" % arrival["phase"].lower()]) * trX.stats.sampling_rate
+                    min_nsamp = int(
+                            (cfg["tlead_%s" % arrival["phase"].lower()]\
+                           + cfg["tlag_%s" % arrival["phase"].lower()]) \
+                           * trX.stats.sampling_rate
+                           )
                     if len(trX) < min_nsamp or len(trY) < min_nsamp:
                         logger.debug("len(trX), len(trY), min_nsamp: "\
-                                    "{:d}, {:d}, {:d}".format(len(trX),
-                                                            len(trY),
-                                                            min_nsamp))
+                                     "{:d}, {:d}, {:d}".format(len(trX),
+                                                               len(trY),
+                                                               min_nsamp))
                         continue
 
                     # max shift :: the maximum shift to apply when cross-correlating
@@ -375,6 +448,7 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                     ## iat      :: inter-arrival time
                     ## _ddiff   :: double-difference (differential travel-time)
                     # Do the actual correlation
+                    __t = time.time()
                     max_shift     = int(len(trY)/2)
                     corr          = op.signal.cross_correlation.correlate(trY,
                                                                         trX,
@@ -388,6 +462,7 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                     #iet           = (otY-otX)
                     #iat           = (t0Y-t0X+tshift)
                     _ddiff = tshift
+                    logger.debug("correlation tooks %.5f seconds" % (time.time() - __t))
                     # store values if the correlation is high
                     if abs(_ccmax) >= cfg["corr_min"]:
                     #if _ccmax >= cfg["corr_min"]:
@@ -416,11 +491,33 @@ def correlate(evid, asdf_dset, f5out, df0_event, df0_phase, cfg):
                 else:
                     data = None
 
-                data = COMM.allgather(data)
-                write_corr(f5out, data)
+                __t = time.time()
+                COMM.send(data, WRITER_RANK)
+                #data = COMM.allgather(data)
+                #write_corr(f5out, data)
+                logger.debug("writing took %.5f seconds" % (time.time() - __t))
 
         logger.info("correlated event ID#{:d} with ID#{:d} - elapsed time: "\
               "{:.2f} s".format(evid0, evidB, time.time()-log_tstart))
+
+def write_loop(f5):
+    _stop_count = 0
+    while True:
+        if _stop_count == SIZE-1:
+            return
+        _data = COMM.recv()
+        if _data is StopIteration:
+            _stop_count += 1
+            print(StopIteration, _stop_count)
+            continue
+        elif _data["dsid"] in f5:
+            f5[_data["dsid"]][:] = (_data["ddiff"],
+                                    _data["ccmax"])
+        else:
+            dset = f5.create_dataset(_data["dsid"],
+                                     data=np.array([_data["ddiff"],
+                                                    _data["ccmax"]]))
+        f5[_data["dsid"]].attrs["chan"] = _data["chan"]
 
 def write_corr(f5out, data):
     for _data in data:
