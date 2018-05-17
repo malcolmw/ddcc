@@ -15,7 +15,6 @@ import obspy as op
 import obspy.signal.cross_correlation
 import os
 import pandas as pd
-import pyasdf
 import sys
 import time
 import traceback
@@ -134,13 +133,13 @@ def configure_logging(verbose, logfile):
         logger.setLevel(level)
         if level == logging.DEBUG:
             formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
-                    "%(funcName)s()::%(lineno)d::{:s}::{:d}:: "\
+                    "%(funcName)s()::%(lineno)d::{:s}::{:04d}:: "\
                     "%(message)s".format(PROCESSOR_NAME, RANK),
-                    datefmt="%Y%j %H:%M:%S")
+                    datefmt="%Y%jT%H:%M:%S")
         else:
             formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
-                    "{:s}::{:d}:: %(message)s".format(PROCESSOR_NAME, RANK),
-                    datefmt="%Y%j %H:%M:%S")
+                    "{:s}::{:04d}:: %(message)s".format(PROCESSOR_NAME, RANK),
+                    datefmt="%Y%jT%H:%M:%S")
         if logfile is not None:
             file_handler = logging.FileHandler(logfile)
             file_handler.setLevel(level)
@@ -315,6 +314,7 @@ def correlate(evid, asdf_h5, df0_event, df0_phase, cfg):
         #               secondary events
         # __df_phase ::
         log_tstart = time.time()
+        _ncorr_a, _ncorr_s = 0, 0
         ot0 = op.core.UTCDateTime(event0["time"])
         otB = op.core.UTCDateTime(eventB["time"])
 
@@ -454,9 +454,11 @@ def correlate(evid, asdf_h5, df0_event, df0_phase, cfg):
                     #iat           = (t0Y-t0X+tshift)
                     _ddiff = tshift
                     logger.debug("correlation tooks %.5f seconds" % (time.time() - __t))
+                    _ncorr_a += 1
                     # store values if the correlation is high
                     if abs(_ccmax) >= cfg["corr_min"]:
                     #if _ccmax >= cfg["corr_min"]:
+                        _ncorr_s += 1
                         ddiff.append(_ddiff)
                         ccmax.append(_ccmax)
             finally:
@@ -484,12 +486,14 @@ def correlate(evid, asdf_h5, df0_event, df0_phase, cfg):
 
                 __t = time.time()
                 COMM.send(data, WRITER_RANK)
-                #data = COMM.allgather(data)
-                #write_corr(f5out, data)
                 logger.debug("writing took %.5f seconds" % (time.time() - __t))
 
         logger.info("correlated event ID#{:d} with ID#{:d} - elapsed time: "\
-              "{:.2f} s".format(evid0, evidB, time.time()-log_tstart))
+                    "{:6.2f} s, ncorr = ({:d}/{:d})".format(evid0,
+                                                            evidB,
+                                                            time.time()-log_tstart,
+                                                            _ncorr_s,
+                                                            _ncorr_a))
 
 def write_loop(f5):
     _stop_count = 0
