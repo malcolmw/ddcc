@@ -22,6 +22,7 @@ import traceback
 
 WRITER_RANK = 0
 
+PROCESSOR_NAME = MPI.Get_processor_name()
 COMM = MPI.COMM_WORLD
 RANK, SIZE = COMM.Get_rank(), COMM.Get_size()
 
@@ -66,10 +67,11 @@ def main(args, cfg):
         logger.info("event and phase data loaded")
 
         if RANK == WRITER_RANK:
-            #data = np.array_split(df0_event.index, SIZE-1)
+# Send assignment to each worker-rank.
             for _rank, _data in zip([i for i in range(SIZE) if i != WRITER_RANK],
                                     np.array_split(df0_event.index, SIZE-1)):
                 COMM.send(_data, _rank)
+# Enter the output loop and exit at the end.
             mode = "w" if args.write is True else "a"
             with h5py.File(args.outfile, mode) as f5:
                 write_loop(f5)
@@ -85,25 +87,21 @@ def main(args, cfg):
                 correlate(evid, asdf_dset, df0_event, df0_phase, cfg)
             except Exception as err:
                 logger.error(err)
-            # Loop and participate in collective write operations until
-            # all processes are finished.
-            #while True:
-            #    data = COMM.allgather(StopIteration)
-            #    if np.all([d is StopIteration for d in data]):
-            #        break
-            #    write_corr(f5out, data)
+# Send a signal to the writer-rank that this worker-rank has finished.
         COMM.send(StopIteration, WRITER_RANK)
     logger.info("successfully completed correlation")
 
 def parse_config(config_file):
     parser = configparser.ConfigParser()
     parser.readfp(open(config_file))
-    config = {"tlead_p"  : parser.getfloat("general", "tlead_p"),
-              "tlead_s"  : parser.getfloat("general", "tlead_s"),
-              "tlag_p"   : parser.getfloat("general", "tlag_p"),
-              "tlag_s"   : parser.getfloat("general", "tlag_s"),
-              "corr_min" : parser.getfloat("general", "corr_min"),
-              "knn"      : parser.getint(  "general", "knn")}
+    config = {"tlead_p"     : parser.getfloat("general", "tlead_p"),
+              "tlead_s"     : parser.getfloat("general", "tlead_s"),
+              "tlag_p"      : parser.getfloat("general", "tlag_p"),
+              "tlag_s"      : parser.getfloat("general", "tlag_s"),
+              "corr_min"    : parser.getfloat("general", "corr_min"),
+              "knn"         : parser.getint(  "general", "knn"),
+              "filter_fmin" : parser.getfloat("filter",  "freq_min"),
+              "filter_fmax" : parser.getfloat("filter",  "freq_max")}
     return(config)
 
 
@@ -120,11 +118,12 @@ def configure_logging(verbose, logfile):
         logger.setLevel(level)
         if level == logging.DEBUG:
             formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
-                    "%(funcName)s()::%(lineno)d::{:d}:: %(message)s".format(RANK),
+                    "%(funcName)s()::%(lineno)d::{:s}::{:d}:: "\
+                    "%(message)s".format(PROCESSOR_NAME, RANK),
                     datefmt="%Y%j %H:%M:%S")
         else:
             formatter = logging.Formatter(fmt="%(asctime)s::%(levelname)s::"\
-                    "::{:d}:: %(message)s".format(RANK),
+                    "{:s}::{:d}:: %(message)s".format(PROCESSOR_NAME, RANK),
                     datefmt="%Y%j %H:%M:%S")
         if logfile is not None:
             file_handler = logging.FileHandler(logfile)
@@ -411,6 +410,13 @@ def correlate(evid, asdf_dset, df0_event, df0_phase, cfg):
                     #    # This is the wrong distance.
                     #    atY = otY + arrival["dist"]/wavespeed
                     atY = otY + ttX
+                    # filter the traces
+                    trX = trX.filter("bandpass",
+                                     freqmin=cfg["filter_fmin"],
+                                     freqmax=cfg["filter_fmax"])
+                    trY = trY.filter("bandpass",
+                                     freqmin=cfg["filter_fmin"],
+                                     freqmax=cfg["filter_fmax"])
                     # slice the template trace
                     trX = trX.slice(starttime=atX-cfg["tlead_%s" % arrival["phase"].lower()],
                                     endtime  =atX+cfg["tlag_%s" % arrival["phase"].lower()])
