@@ -204,70 +204,6 @@ def get_phases(evids, df_phase):
         ).sort_values(["sta", "phase"])
     )
 
-def append_f5out(f5out, args, cfg):
-    """
-    Append metadata structure for output HDF5 file.
-
-    This is a collective operation.
-    """
-    with pd.HDFStore(args.events_in, "r") as f5in:
-        df0_event = f5in["event"]
-        df0_phase = f5in["phase"]
-        for evid0 in df0_event.index:
-            logger.info("initializing output for {:d}".format(evid0))
-            for evidB in get_knn(evid0, df0_event, k=cfg["knn"]).iloc[1:].index:
-                df_phase = get_phases(
-                    (evid0, evidB),
-                    df0_phase
-                ).drop_duplicates(
-                    ["sta", "phase"]
-                )
-                for _, arrival in df_phase.iterrows():
-                    dsid = "{:d}/{:d}/{:s}/{:s}".format(evid0,
-                                                        evidB,
-                                                        arrival["sta"],
-                                                        arrival["phase"])
-                    if dsid not in f5out:
-                        dset = f5out.create_dataset(dsid,
-                                                    (2,),
-                                                    dtype="f",
-                                                    fillvalue=np.nan)
-                        dset.attrs["chan"] = arrival["chan"]
-                        logger.debug(dsid)
-                    else:
-                        logger.debug("{:s} already exists".format(dsid))
-
-def initialize_f5out(f5out, args, cfg):
-    """
-    Initialize metadata structure for output HDF5 file.
-
-    This is a collective operation.
-    """
-    with pd.HDFStore(args.events_in, "r") as f5in:
-        df0_event = f5in["event"]
-        df0_phase = f5in["phase"]
-        for evid0 in df0_event.index:
-            for evidB in get_knn(evid0, df0_event, k=cfg["knn"]).iloc[1:].index:
-                df_phase = get_phases(
-                    (evid0, evidB),
-                    df0_phase
-                ).drop_duplicates(
-                    ["sta", "phase"]
-                )
-                for _, arrival in df_phase.iterrows():
-                    grpid = "{:d}/{:d}/{:s}".format(evid0, evidB, arrival["sta"])
-                    if grpid not in f5out:
-                        grp = f5out.create_group(grpid)
-                    else:
-                        grp = f5out[grpid]
-                    logger.debug("{:s}/{:s}".format(grpid,
-                                                    arrival["phase"]))
-                    dset = grp.create_dataset(arrival["phase"],
-                                              (2,),
-                                              dtype="f",
-                                              fillvalue=np.nan)
-                    dset.attrs["chan"] = arrival["chan"]
-
 def correlate(evid, asdf_h5, df0_event, df0_phase, cfg):
     """
     Correlate an event with its K nearest-neighbours.
@@ -330,10 +266,6 @@ def correlate(evid, asdf_h5, df0_event, df0_phase, cfg):
             # stB     :: waveform Stream for secondary event
             ddiff, ccmax = [], []
             try:
-                #st0 = asdf_dset.waveforms["%s.%s" % (arrival["net"],
-                #                                     arrival["sta"])]["event%d" % evid0]
-                #stB = asdf_dset.waveforms["%s.%s" % (arrival["net"],
-                #                                     arrival["sta"])]["event%d" % evidB]
                 __t = time.time()
                 st0 = get_waveforms_for_reference(asdf_h5,
                                                   "event%d" % evid0,
@@ -449,8 +381,6 @@ def correlate(evid, asdf_h5, df0_event, df0_phase, cfg):
                                             trX.stats.endtime.timestamp])
                     t0Y           = np.mean([trY.stats.starttime.timestamp,
                                             trY.stats.endtime.timestamp])
-                    #iet           = (otY-otX)
-                    #iat           = (t0Y-t0X+tshift)
                     _ddiff = tshift
                     logger.debug("correlation tooks %.5f seconds" % (time.time() - __t))
                     _ncorr_a += 1
@@ -514,19 +444,6 @@ def write_loop(f5):
                                      data=np.array([_data["ddiff"],
                                                     _data["ccmax"]]))
         f5[_data["dsid"]].attrs["chan"] = _data["chan"]
-
-def write_corr(f5out, data):
-    for _data in data:
-        if _data is None or _data is StopIteration:
-            continue
-        if _data["dsid"] in f5out:
-            f5out[_data["dsid"]][:] = (_data["ddiff"],
-                                        _data["ccmax"])
-        else:
-            dset = f5out.create_dataset(_data["dsid"],
-                                        data=np.array([_data["ddiff"],
-                                                        _data["ccmax"]]))
-        f5out[_data["dsid"]].attrs["chan"] = _data["chan"]
 
 def detect_python_version():
     if sys.version_info.major != 2:
