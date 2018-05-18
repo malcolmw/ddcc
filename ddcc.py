@@ -13,11 +13,10 @@ import mpi4py.MPI as MPI
 import numpy as np
 import obspy as op
 import obspy.signal.cross_correlation
-import os
 import pandas as pd
+import signal
 import sys
 import time
-import traceback
 
 WRITER_RANK = 0
 
@@ -534,6 +533,13 @@ def detect_python_version():
         logger.error("Python2 is currently the only supported version of this"
                      "code. Please use a Python2 interpreter.")
         exit()
+
+def signal_handler(sig, frame):
+    raise(SystemError("Interrupting signal received... aborting"))
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGCONT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == "__main__":
     args = parse_args()
