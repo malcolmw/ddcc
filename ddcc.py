@@ -63,10 +63,17 @@ def main(args, cfg):
     logger.info("event and phase data loaded")
 
     if RANK == WRITER_RANK:
+# Skip events if they already have ANY correlations.
+# This is hacky, but SWMR mode is the best way I can think of right now
+# to implement this properly, and it requires HDF5 v1.10, but the HPC
+# only supports v1.8.
+        with h5py.File(args.outfile, mode="r") as f5:
+            skip = [int(key) for key in sorted(list(f5))]
 # Send assignment to each worker-rank.
         for _rank, _data in zip([i for i in range(SIZE) if i != WRITER_RANK],
                                 np.array_split(df0_event.index, SIZE-1)):
-            COMM.send(_data, _rank)
+            COMM.send([_d for _d in _data if _d not in skip], _rank)
+        del(skip)
 # Enter the output loop and exit at the end.
         mode = "w" if args.write is True else "a"
         with h5py.File(args.outfile, mode) as f5:
