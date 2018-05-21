@@ -13,6 +13,7 @@ import mpi4py.MPI as MPI
 import numpy as np
 import obspy as op
 import obspy.signal.cross_correlation
+import os
 import pandas as pd
 import signal
 import sys
@@ -67,8 +68,11 @@ def main(args, cfg):
 # This is hacky, but SWMR mode is the best way I can think of right now
 # to implement this properly, and it requires HDF5 v1.10, but the HPC
 # only supports v1.8.
-        with h5py.File(args.outfile, mode="r") as f5:
-            skip = [int(key) for key in sorted(list(f5))]
+        if not os.path.isfile(args.outfile):
+            skip = []
+        else:
+            with h5py.File(args.outfile, mode="r") as f5:
+                skip = [int(key) for key in sorted(list(f5))]
 # Send assignment to each worker-rank.
         for _rank, _data in zip([i for i in range(SIZE) if i != WRITER_RANK],
                                 np.array_split(df0_event.index, SIZE-1)):
