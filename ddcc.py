@@ -20,6 +20,7 @@ import sys
 import time
 
 WRITER_RANK = 0
+OUTPUT_BLOCK_SIZE = 1000
 
 PROCESSOR_NAME = MPI.Get_processor_name()
 COMM = MPI.COMM_WORLD
@@ -42,10 +43,9 @@ def parse_args():
                         type=str,
                         default="corr.h5",
                         help="output HDF5 file for correlation results")
-    parser.add_argument("-w", "--write",
-                        action="store_true",
-                        help="open output HDF5 file in write mode, "\
-                             "nuke any existing file")
+    parser.add_argument("-c", "--control",
+                        type=str,
+                        help="HDF5 control file with events to correlate")
     parser.add_argument("-l", "--logfile",
                         type=str,
                         help="log file")
@@ -64,23 +64,19 @@ def main(args, cfg):
     logger.info("event and phase data loaded")
 
     if RANK == WRITER_RANK:
-# Skip events if they already have ANY correlations.
-# This is hacky, but SWMR mode is the best way I can think of right now
-# to implement this properly, and it requires HDF5 v1.10, but the HPC
-# only supports v1.8.
-        if not os.path.isfile(args.outfile):
-            skip = []
+        if args.control is not None:
+            with pd.HDFStore(args.control) as control:
+                control_list = control["events"]
+                #df0_event = df0_event[df0_event.index.isin(control_list)]
         else:
-            with h5py.File(args.outfile, mode="r") as f5:
-                skip = [int(key) for key in sorted(list(f5))]
+            control_list = df0_event.index
 # Send assignment to each worker-rank.
         for _rank, _data in zip([i for i in range(SIZE) if i != WRITER_RANK],
-                                np.array_split(df0_event.index, SIZE-1)):
-            COMM.send([_d for _d in _data if _d not in skip], _rank)
-        del(skip)
+                                np.array_split(control_list, SIZE-1)):
+            COMM.send(_data, _rank)
 # Enter the output loop and exit at the end.
-        mode = "w" if args.write is True else "a"
-        with h5py.File(args.outfile, mode) as f5:
+        with h5py.File(args.outfile, "w") as f5:
+            initialize_output(f5)
             write_loop(f5)
         exit()
 
@@ -107,10 +103,12 @@ def main(args, cfg):
                 except Exception as err:
                     logger.error(err)
             logger.info("successfully completed correlation")
+    except Exception as err:
+        logger.error(err)
+        fid.close()
     finally:
 # Send a signal to the writer-rank that this worker-rank has finished.
         COMM.send(StopIteration, WRITER_RANK)
-        fid.close()
 
 def parse_config(config_file):
     parser = configparser.ConfigParser()
@@ -322,20 +320,6 @@ def correlate(evid, asdf_h5, df0_event, df0_phase, cfg):
                         otX, otY     = otB, ot0
                         evidX, evidY = evidB, evid0
                     ttX = atX - otX
-                    # Get the arrival time for the test trace. Use the
-                    # from the database if one exists, otherwise do
-                    # a simple arrival time prediction.
-                    #if evidY in _df_phase.index\
-                    #        and np.any((_df_phase.loc[evidY]["sta"]    == arrival["sta"])\
-                    #                  &(_df_phase.loc[evidY]["phase"] == arrival["phase"])):
-                    #    _df = _df_phase.loc[evidY]
-                    #    _arrival = _df[(_df["sta"] == arrival["sta"])
-                    #                  &(_df["phase"] == arrival["phase"])].iloc[0]
-                    #    atY = op.core.UTCDateTime(_arrival["time"])
-                    #else:
-                    #    wavespeed = cfg["vp"] if arrival["phase"] == "P" else cfg["vs"]
-                    #    # This is the wrong distance.
-                    #    atY = otY + arrival["dist"]/wavespeed
                     atY = otY + ttX
                     # filter the traces
                     trX = trX.filter("bandpass",
@@ -435,26 +419,43 @@ def correlate(evid, asdf_h5, df0_event, df0_phase, cfg):
                                                             _ncorr_s,
                                                             _ncorr_a))
 
+def initialize_output(f5):
+    f5.create_dataset("evidA", (0,), maxshape=(None,), dtype="i")
+    f5.create_dataset("evidB", (0,), maxshape=(None,), dtype="i")
+    f5.create_dataset("sta", (0,), maxshape=(None,), dtype="S5")
+    f5.create_dataset("chan", (0,), maxshape=(None,), dtype="S6")
+    f5.create_dataset("phase", (0,), maxshape=(None,), dtype="S1")
+    f5.create_dataset("ddiff", (0,), maxshape=(None,), dtype="f")
+    f5.create_dataset("ccmax", (0,), maxshape=(None,), dtype="f")
+
 def write_loop(f5):
-    _stop_count = 0
+    stop_count = 0
+    idx = 0
+    keys = ("evidA", "evidB", "sta", "phase", "chan", "ddiff", "ccmax")
     while True:
-        if _stop_count == SIZE-1:
+        if stop_count == SIZE-1:
             return
-        _data = COMM.recv()
-        if _data is None:
+        data = COMM.recv()
+        if data is None:
             continue
-        elif _data is StopIteration:
-            _stop_count += 1
-            print(StopIteration, _stop_count)
+        elif data is StopIteration:
+            stop_count += 1
             continue
-        elif _data["dsid"] in f5:
-            f5[_data["dsid"]][:] = (_data["ddiff"],
-                                    _data["ccmax"])
         else:
-            dset = f5.create_dataset(_data["dsid"],
-                                     data=np.array([_data["ddiff"],
-                                                    _data["ccmax"]]))
-        f5[_data["dsid"]].attrs["chan"] = _data["chan"]
+            if idx % OUTPUT_BLOCK_SIZE == 0:
+                for key in keys:
+                    f5[key].resize((f5[key].shape[0] + OUTPUT_BLOCK_SIZE,))
+            evidA, evidB, sta, phase = data["dsid"].split("/")
+            values = [int(evidA),
+                      int(evidB),
+                      sta.encode(),
+                      phase.encode(),
+                      data["chan"].encode(),
+                      data["ddiff"],
+                      data["ccmax"]]
+            for key, value in zip(keys, values):
+                f5[key][idx] = value
+            idx += 1
 
 def detect_python_version():
     if sys.version_info.major != 2:
