@@ -63,13 +63,15 @@ def main(args, cfg):
     df0_event, df0_phase = load_event_data(args.events_in)
     logger.info("event and phase data loaded")
 
+    if args.control is not None:
+        logger.info("using control file %s" % args.control)
+        with pd.HDFStore(args.control, mode="r") as control:
+            control_list = control["events"]
+            df0_event = df0_event[df0_event.index.isin(control_list)]
+    else:
+        control_list = df0_event.index
+
     if RANK == WRITER_RANK:
-        if args.control is not None:
-            with pd.HDFStore(args.control) as control:
-                control_list = control["events"]
-                #df0_event = df0_event[df0_event.index.isin(control_list)]
-        else:
-            control_list = df0_event.index
 # Send assignment to each worker-rank.
         for _rank, _data in zip([i for i in range(SIZE) if i != WRITER_RANK],
                                 np.array_split(control_list, SIZE-1)):
