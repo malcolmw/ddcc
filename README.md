@@ -1,5 +1,6 @@
 # ddcc - Double-difference cross-correlation
 [![Build Status](https://travis-ci.org/malcolmw/ddcc.svg?branch=master)](https://travis-ci.org/malcolmw/ddcc)
+# !!!DEPRECATED!!! This repository is inefficient and I do not advise using it. Consider instead using scripts in [PyCatEQ](https://github.com/malcolmw/PyCatEQ).
 
 Parallel double-difference cross-correlation code based on [pyasdf](http://seismicdata.github.io/pyasdf).
 
